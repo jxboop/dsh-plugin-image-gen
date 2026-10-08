@@ -10,6 +10,8 @@ export interface Config {
     enhance: boolean;
     private: boolean;
     nologo: boolean;
+    /** 出图后本地抹掉智谱的「AI生成」角标（官方 watermark_enabled:false 实测无效）。 */
+    removeWatermark: boolean;
     safe: boolean;
     /** 可选 pollinations token（空字符串 = 匿名档）。 */
     token: string;
@@ -72,6 +74,17 @@ export declare const Config: z<Schemastery.ObjectS<{
      * 想要无水印图只能换后端（默认已改为 huggingface / 或配 together.key）。
      */
     nologo: z<boolean, boolean>;
+    /**
+     * 出图后**本地抹掉智谱右下角的「AI生成」角标**（默认开）。
+     *
+     * 为什么必须本地做：官方请求体里的 `watermark_enabled: false` **实测无效** ——
+     * 2026-10-08 用同一个 key 发过，回来的文件名照旧 `..._watermark.png`、像素上照旧有角标。
+     * 现在的做法是像素级扩散修补（`src/dewatermark.ts`）：把右下角 20%×10% 的区域用四周
+     * 真实像素当边界重新解出来，没有硬接缝。约 0.8 秒/张；失败只记 note，不让生图失败。
+     *
+     * 想保留角标（例如要公开传播 AI 内容、需要显式标识）就把这项设成 false。
+     */
+    removeWatermark: z<boolean, boolean>;
     /**
      * 安全过滤。**默认 false**：实测 safe=true 会被判到付费面返回 402，
      * 故默认关闭以免工具整体不可用；需要严格过滤时再手动打开。
@@ -171,6 +184,17 @@ export declare const Config: z<Schemastery.ObjectS<{
      * 想要无水印图只能换后端（默认已改为 huggingface / 或配 together.key）。
      */
     nologo: z<boolean, boolean>;
+    /**
+     * 出图后**本地抹掉智谱右下角的「AI生成」角标**（默认开）。
+     *
+     * 为什么必须本地做：官方请求体里的 `watermark_enabled: false` **实测无效** ——
+     * 2026-10-08 用同一个 key 发过，回来的文件名照旧 `..._watermark.png`、像素上照旧有角标。
+     * 现在的做法是像素级扩散修补（`src/dewatermark.ts`）：把右下角 20%×10% 的区域用四周
+     * 真实像素当边界重新解出来，没有硬接缝。约 0.8 秒/张；失败只记 note，不让生图失败。
+     *
+     * 想保留角标（例如要公开传播 AI 内容、需要显式标识）就把这项设成 false。
+     */
+    removeWatermark: z<boolean, boolean>;
     /**
      * 安全过滤。**默认 false**：实测 safe=true 会被判到付费面返回 402，
      * 故默认关闭以免工具整体不可用；需要严格过滤时再手动打开。

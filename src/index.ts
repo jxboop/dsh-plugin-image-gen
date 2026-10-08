@@ -23,6 +23,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { AttachmentId, type ImageAttachmentRef, type ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
+import { dewatermark } from './dewatermark.js'
 
 export const name = '@dsh-external/dsh-plugin-image-gen'
 export const inject = ['tools', 'attachments']
@@ -35,6 +36,8 @@ export interface Config {
   enhance: boolean
   private: boolean
   nologo: boolean
+  /** 出图后本地抹掉智谱的「AI生成」角标（官方 watermark_enabled:false 实测无效）。 */
+  removeWatermark: boolean
   safe: boolean
   /** 可选 pollinations token（空字符串 = 匿名档）。 */
   token: string
@@ -86,6 +89,17 @@ export const Config = z.object({
    * 想要无水印图只能换后端（默认已改为 huggingface / 或配 together.key）。
    */
   nologo: z.boolean().default(true),
+  /**
+   * 出图后**本地抹掉智谱右下角的「AI生成」角标**（默认开）。
+   *
+   * 为什么必须本地做：官方请求体里的 `watermark_enabled: false` **实测无效** ——
+   * 2026-10-08 用同一个 key 发过，回来的文件名照旧 `..._watermark.png`、像素上照旧有角标。
+   * 现在的做法是像素级扩散修补（`src/dewatermark.ts`）：把右下角 20%×10% 的区域用四周
+   * 真实像素当边界重新解出来，没有硬接缝。约 0.8 秒/张；失败只记 note，不让生图失败。
+   *
+   * 想保留角标（例如要公开传播 AI 内容、需要显式标识）就把这项设成 false。
+   */
+  removeWatermark: z.boolean().default(true),
   /**
    * 安全过滤。**默认 false**：实测 safe=true 会被判到付费面返回 402，
    * 故默认关闭以免工具整体不可用；需要严格过滤时再手动打开。
@@ -265,6 +279,10 @@ interface FetchedImage {
   strategy: string
   /** 在它之前失败/被跳过的后端（成功时也带出来，否则"悄悄降级"没人知道）。 */
   skipped?: string[]
+  /** 本地把智谱的「AI生成」角标抹掉了（见 removeWatermark 配置）。 */
+  watermarkRemoved?: boolean
+  /** 想抹但没抹成的原因（去水印是可选增强，失败不影响出图）。 */
+  watermarkNote?: string
 }
 
 /**
@@ -644,8 +662,24 @@ async function fetchImage(
         : provider === 'pollinations' ? await fetchFromPollinations(config, prompt, o, timeoutMs)
         : undefined
       if (image === undefined) { failures.push(`${provider}: 未知后端`); continue }
+      /*
+       * 智谱的图右下角烧着一个「AI生成」角标（官方 `watermark_enabled: false` 实测无效），
+       * 默认出图后本地抹掉。这是**可选增强**：抹不掉也要把图交出去，所以只记 note。
+       */
+      let result = image
+      if (provider === 'zhipu' && config.removeWatermark !== false) {
+        try {
+          const cleaned = await dewatermark(image.data, { mode: 'inpaint' })
+          result = { ...image, data: new Uint8Array(cleaned), mediaType: 'image/jpeg', watermarkRemoved: true }
+        } catch (error) {
+          result = {
+            ...image,
+            watermarkNote: `去水印没做成（${error instanceof Error ? error.message : String(error)}），图仍是原样`,
+          }
+        }
+      }
       // 前面有后端挂了/被跳过才带 skipped：让"其实是用兜底出的图"这件事浮到 note 上。
-      return failures.length === 0 ? image : { ...image, skipped: failures }
+      return failures.length === 0 ? result : { ...result, skipped: failures }
     } catch (error) {
       failures.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -675,7 +709,7 @@ const LOCAL_CONFIG_FILE = 'image-gen.json'
 /** 允许被本地文件覆盖的键。`toolTimeoutMs` 故意不在内：工具超时必须在注册时就定下来。 */
 const LOCAL_KEYS = new Set([
   'endpoint', 'width', 'height', 'model', 'enhance', 'private', 'nologo', 'token',
-  'providers', 'huggingface', 'together', 'zhipu', 'attach', 'timeoutMs',
+  'providers', 'huggingface', 'together', 'zhipu', 'attach', 'timeoutMs', 'removeWatermark',
 ])
 
 const LOCAL_TEMPLATE = `${JSON.stringify({
@@ -683,6 +717,7 @@ const LOCAL_TEMPLATE = `${JSON.stringify({
   _国内最稳: '去 https://open.bigmodel.cn 免费注册（送额度，cogview-3-flash 免费）→ key 填进 zhipu.key → providers 改成 ["zhipu"]。不用加速器。',
   _有加速器: '去 https://api.together.xyz 免费注册拿 key → 填进 together.key → providers 改成 ["together"]（1-3 秒出图）。',
   _pollinations_token: 'https://gen.pollinations.ai 免费注册拿 token 填进 token，比匿名档稳（匿名约 15 秒一条）。',
+  _去水印: '智谱的图右下角有「AI生成」角标，默认出图后本地抹掉（removeWatermark: true）。想保留角标（比如要公开传播 AI 内容、需要显式标识）就改成 false。',
   providers: ['pollinations', 'huggingface'],
   zhipu: { key: '' },
   together: { key: '' },
@@ -691,6 +726,7 @@ const LOCAL_TEMPLATE = `${JSON.stringify({
   width: 1024,
   height: 1024,
   attach: true,
+  removeWatermark: true,
   timeoutMs: 60000,
 }, null, 2)}\n`
 
@@ -882,6 +918,10 @@ export function apply(ctx: Context, config: Config): void {
         local.note,
         fetched.note === undefined ? '' : `已降档重试（${fetched.strategy}）；首次请求：${fetched.note}`,
         (fetched.skipped ?? []).length === 0 ? '' : `本次是用兜底后端出的图，前面没成：${(fetched.skipped ?? []).join('；')}`,
+        fetched.watermarkRemoved === true
+          ? '已去掉智谱右下角的「AI生成」水印（想保留：配置里把 removeWatermark 设为 false）'
+          : '',
+        fetched.watermarkNote ?? '',
       ].filter((entry) => entry !== '')
 
       return {

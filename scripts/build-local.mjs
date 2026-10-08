@@ -36,6 +36,9 @@ const DEPS = {
   '@deepseek-ai/dsh-system-prompt': ['node_modules/@deepseek-ai/dsh-system-prompt', 'packages/core/system-prompt'],
   '@deepseek-ai/dsh-attachment': ['node_modules/@deepseek-ai/dsh-attachment', 'packages/core/attachment'],
   '@types/node': ['node_modules/@types/node', 'node_modules/@types/node'],
+  // 去水印（src/dewatermark.ts）要动像素：sharp 是 dsh 安装自带的那份（它自己做图片
+  // 归一化也在用），挂个 junction 让插件运行时能 require 到，不必额外下载。
+  sharp: ['node_modules/sharp', 'node_modules/sharp'],
 }
 
 /** 依赖源候选：固定安装 → 源码 checkout。 */

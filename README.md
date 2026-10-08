@@ -137,7 +137,8 @@ markdown 图片能不能渲染取决于 GUI 渲染器与 CSP；**附件是 DSH �
 | `width` / `height` | 1024 / 1024 | 默认尺寸（等于上游默认值；默认尺寸下**不写进 URL**，见下） |
 | `enhance` | `false` | 接口侧提示词增强。**默认关**：匿名档带它会 402 |
 | `private` | `false` | 隐藏到公共 feed。**默认关**：匿名档带它会 402 |
-| `nologo` | `true` | 去水印 |
+| `nologo` | `true` | pollinations 的 nologo 参数（⚠️ 实测**去不掉** pollinations 的水印，那是上游服务端烧进像素的） |
+| `removeWatermark` | `true` | **出图后本地抹掉智谱右下角的「AI生成」角标**（见下） |
 | `safe` | `false` | 严格 NSFW 过滤。**默认关**：匿名档带它会 402 |
 | `token` | `''` | pollinations token（`auth.pollinations.ai` 免费注册） |
 | `attach` | `true` | 默认是否取回并落为附件 |
@@ -147,6 +148,26 @@ markdown 图片能不能渲染取决于 GUI 渲染器与 CSP；**附件是 DSH �
 | `together.baseUrl` | `https://api.together.xyz/v1` | OpenAI 兼容端点 |
 | `together.model` | `black-forest-labs/FLUX.1-schnell-Free` | 官方标注免费无限量 |
 | `timeoutMs` | 60000 | 单次取图超时 |
+
+### 去水印（`removeWatermark`，默认开）
+
+智谱的图右下角烧着一个「AI生成」角标。**官方的 `watermark_enabled: false` 实测无效** ——
+用同一个 key 发过，回来的文件名照旧 `..._watermark.png`、像素上照旧有它，所以只能在本地做：
+
+- 出图后自动**扩散修补**右下角 20%×10%（角标实测在 x 841–1014 / y 946–1014，外加一圈淡光晕）：
+  用四周真实像素当边界重新解出来，多尺度金字塔，约 **0.8 秒/张**，没有硬接缝。
+- 出图结果的 note 会写"已去掉…水印"，**不偷偷改图**；想保留角标（例如要公开发布 AI 内容、
+  按规矩需要显式标识）就把 `removeWatermark` 设成 `false`。
+- 处理已有的老图（用同一份实现）：
+
+```bash
+node scripts/dewatermark.mjs 图.jpg 输出.jpg        # 单张
+node scripts/dewatermark.mjs ./某目录 --all          # 批量覆盖，原图留 .orig 备份
+node scripts/dewatermark.mjs 图.jpg 输出.jpg --mode crop   # 直接裁掉最下面 10%
+```
+
+> 依赖 `sharp`：本机 dsh 安装里自带（它自己做图片归一化在用），`npm run build:local` 会把它
+> 挂进本包 `node_modules`。找不到 sharp 时**只是不去水印**，图照出、note 里说明原因。
 
 ---
 

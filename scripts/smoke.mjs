@@ -10,6 +10,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, name, inject, Config } from '../lib/index.js'
+import { loadSharp } from '../lib/dewatermark.js'
 
 // 本地配置文件默认写在 $DSH_HOME/image-gen.json —— 跑测试时把它指到临时目录，
 // 免得污染使用者真实的 ~/.dsh。
@@ -221,5 +222,81 @@ let goodKeyValue = null
 try { goodKeyValue = await registered.execute({ prompt }, {}) } catch (error) { goodKeyValue = String(error?.message ?? error) }
 globalThis.fetch = realFetch
 console.log(`合法 key 照发 = ${goodKeyRequests === 1}  出图=${goodKeyValue?.image === undefined ? String(goodKeyValue).slice(0, 60) : goodKeyValue.model}`)
+
+console.log('\n=== 10. 出图后本地抹掉智谱的「AI生成」角标 ===')
+/*
+ * 现场：智谱的图右下角烧着「AI生成」。官方请求体里的 `watermark_enabled: false` **实测无效**
+ * （2026-10-08 发过，文件名照旧 ..._watermark.png、像素照旧有角标），所以只能本地做：
+ * 把右下角 20%×10% 用**扩散修补**重解（src/dewatermark.ts）。
+ *
+ * 这里合成一张"带角标"的图当上游产物，验证三件事：
+ *   ① 角标那块真的变了；② 框【外面】几乎没被动过（去水印不能毁图）；③ 关掉开关就一点也不动。
+ */
+{
+  const sharp = loadSharp()
+  const box = { left: Math.round(1024 * 0.8), top: Math.round(1024 * 0.9), width: 205, height: 102 }
+  const base = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: { r: 206, g: 210, b: 214 } } })
+    .jpeg().toBuffer()
+  const mark = await sharp({ create: { width: box.width - 20, height: box.height - 24, channels: 4, background: { r: 60, g: 60, b: 60, alpha: 1 } } })
+    .png().toBuffer()
+  const watermarked = await sharp(base)
+    .composite([{ input: mark, left: box.left + 10, top: box.top + 12 }])
+    .jpeg({ quality: 95 })
+    .toBuffer()
+
+  /** 区域内逐像素平均差（0-255）。 */
+  const regionDiff = async (a, b, region) => {
+    const one = await sharp(a).extract(region).removeAlpha().raw().toBuffer()
+    const two = await sharp(b).extract(region).removeAlpha().raw().toBuffer()
+    let sum = 0
+    for (let i = 0; i < one.length; i += 1) sum += Math.abs(one[i] - two[i])
+    return sum / one.length
+  }
+
+  const serveWatermarked = () => {
+    globalThis.fetch = async (url, init) => {
+      if (String(url).includes('open.bigmodel.cn')) {
+        return new Response(JSON.stringify({ data: [{ url: 'https://example.invalid/fake.png' }] }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (String(url).includes('example.invalid')) {
+        return new Response(watermarked, { status: 200, headers: { 'content-type': 'image/png' } })
+      }
+      return await realFetch(url, init)
+    }
+  }
+
+  const runOnce = async (removeWatermark) => {
+    savedInputs.length = 0
+    writeFileSync(localConfigPath, JSON.stringify({
+      providers: ['zhipu'], width: 1024, height: 1024, removeWatermark, zhipu: { key: FAKE_ZHIPU_KEY },
+    }), 'utf8')
+    serveWatermarked()
+    const value = await registered.execute({ prompt }, {})
+    globalThis.fetch = realFetch
+    return { value, saved: savedInputs[0]?.data }
+  }
+
+  const on = await runOnce(true)
+  const off = await runOnce(false)
+  const cleaned = Buffer.from(on.saved ?? [])
+  const untouched = Buffer.from(off.saved ?? [])
+  console.log(`出图成功      = ${on.value?.image === undefined ? '没出图' : on.value.image.mediaType + ' / ' + on.value.model}`)
+  console.log(`note 有交代   = ${String(on.value?.note ?? '').includes('去水印') || String(on.value?.note ?? '').includes('AI生成')}`)
+  const inside = cleaned.length === 0 ? 0 : await regionDiff(watermarked, cleaned, box)
+  const outside = cleaned.length === 0 ? 0 : await regionDiff(watermarked, cleaned, { left: 0, top: box.top - 130, width: 1024, height: 120 })
+  console.log(`角标区域变化  = ${inside.toFixed(1)}（应远大于 0：那块被重解掉了）`)
+  console.log(`框外变化      = ${outside.toFixed(3)}（应≈0：不能把图其它地方也改了）`)
+  console.log(`产物是 JPEG   = ${cleaned[0] === 0xff && cleaned[1] === 0xd8}`)
+  let mismatch = 0
+  for (let i = 0; i < Math.min(untouched.length, watermarked.length); i += 1) {
+    if (untouched[i] !== watermarked[i]) mismatch += 1
+  }
+  console.log(`关掉开关就不动= ${untouched.length === watermarked.length && mismatch === 0}` +
+    `（存进去 ${untouched.length} 字节 / 上游 ${watermarked.length} 字节，不同字节 ${mismatch}）`)
+  console.log(`关掉后没交代  = ${String(off.value?.note ?? '').includes('去水印') === false}`)
+  writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: FAKE_ZHIPU_KEY } }), 'utf8')
+}
 
 console.log('\nSMOKE OK')
