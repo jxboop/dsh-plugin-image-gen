@@ -165,5 +165,28 @@ console.log(`带 Bearer     = ${(sawZhipu?.auth ?? '').startsWith('Bearer ')}`)
 console.log(`size 是字符串 = ${/^\d+x\d+$/.test(String(sawZhipu?.body?.size))}`)
 console.log(`只塞三个字段  = ${sawZhipu !== null && JSON.stringify(Object.keys(sawZhipu.body).sort()) === '["model","prompt","size"]'}`)
 console.log(`出图解析      = ${zhipuValue?.image === undefined ? '没拿到图 ' + zhipuError : '拿到图 ' + zhipuValue.image.mediaType + ' / ' + zhipuValue.model}`)
+// 尺寸映射：智谱只认官方那 7 档，手机生图面板给的 1024×1536 这种必须被换成最接近的档位。
+// 期望值按"比例最接近"算：
+//   1024×1536 = 2:3(0.667)  → 864x1152 = 3:4(0.750) 比 768x1344(0.571) 更近
+//   1920×1080 = 16:9(1.778) → 1344x768 = 7:4(1.750) 比 1440x720(2.0) 更近
+const zhipuSizes = ['1024x1024', '768x1344', '864x1152', '1344x768', '1152x864', '1440x720', '720x1440']
+const sizeCases = [[1024, 1024, '1024x1024'], [1024, 1536, '864x1152'], [1536, 1024, '1152x864'], [1920, 1080, '1344x768']]
+let sizeOk = true
+for (const [w, h, want] of sizeCases) {
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('open.bigmodel.cn')) {
+      sawZhipu = { url: String(url), body: JSON.parse(String(init?.body ?? '{}')), auth: '' }
+      return new Response(JSON.stringify({ data: [{ url: 'https://example.invalid/fake.png' }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), { status: 200, headers: { 'content-type': 'image/png' } })
+  }
+  writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: 'k' }, width: w, height: h }), 'utf8')
+  await registered.execute({ prompt }, {})
+  const got = sawZhipu?.body?.size
+  const legal = zhipuSizes.includes(String(got))
+  if (got !== want || !legal) { sizeOk = false; console.log(`  ⚠️ ${w}x${h} -> ${got}（期望 ${want}，合法=${legal}）`) }
+}
+globalThis.fetch = realFetch
+console.log(`尺寸映射      = ${sizeOk ? '全对（1024x1536→864x1152、1920x1080→1344x768 …）' : '有错，见上'}`)
 
 console.log('\nSMOKE OK')

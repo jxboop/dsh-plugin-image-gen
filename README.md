@@ -66,7 +66,7 @@ dsh plugin --profile web add <本仓库的绝对路径>
 
 | 你的情况 | 建议 |
 |---|---|
-| **国内、想稳定**（推荐） | 去 <https://open.bigmodel.cn> **免费注册**（送额度，`cogview-3-flash` 免费）→ key 填 `zhipu.key`，`providers` 改成 `["zhipu"]`。**不用加速器**（`open.bigmodel.cn` 国内直连，实测 401 = 通） |
+| **国内、想稳定**（推荐） | 去 <https://bigmodel.cn/usercenter/proj-mgmt/apikeys> **免费注册拿 key**（送额度，`cogview-3-flash` **免费**）→ key 填 `zhipu.key`，`providers` 改成 `["zhipu"]`。**不用加速器**（`open.bigmodel.cn` 国内直连，实测 401 = 通） |
 | 国内、不想注册 | **保持默认**：`providers: ["pollinations","huggingface"]`。pollinations 国内可直连；HF 通常连不上，但插件会**探一下、不通就跳过**（不会白等） |
 | 想再稳一点（不注册智谱） | 去 <https://gen.pollinations.ai> 免费注册拿 token，填进 `token` |
 | 有加速器 / 在海外 | 去 <https://api.together.xyz> 免费注册拿 key，填 `together.key`，`providers` 改成 `["together"]`（最快，1–3 秒出图）。⚠️ 它的 API 域名在国内**被 Cloudflare 按 IP 挡**（带 key 也是 403），必须挂着加速器用 |
@@ -128,6 +128,10 @@ markdown 图片能不能渲染取决于 GUI 渲染器与 CSP；**附件是 DSH �
 | `zhipu.key` | `''` | **智谱 BigModel 的 key（国内推荐：直连可用、注册送额度、`cogview-3-flash` 免费）** |
 | `zhipu.baseUrl` | `https://open.bigmodel.cn/api/paas/v4` | 智谱端点 |
 | `zhipu.model` | `cogview-3-flash` | 免费模型；要更好画质可换 `cogview-3` / `cogview-3-plus`（计费） |
+
+> **智谱只认官方那 7 档尺寸**：`1024x1024` `768x1344` `864x1152` `1344x768` `1152x864` `1440x720` `720x1440`。
+> 你请求别的（比如手机生图面板的 1024×1536）会被**自动映射到比例最接近的一档**，不会因此失败
+> （见 `pickZhipuSize`）。
 | `endpoint` | `https://image.pollinations.ai/prompt/` | pollinations 接口前缀，prompt 以 URL 编码追加其后 |
 | `model` | `flux` | pollinations 模型 |
 | `width` / `height` | 1024 / 1024 | 默认尺寸（等于上游默认值；默认尺寸下**不写进 URL**，见下） |
