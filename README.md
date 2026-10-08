@@ -193,26 +193,36 @@ Together.ai 的 `black-forest-labs/FLUX.1-schnell-Free` 官方标注免费无限
 
 ## 构建
 
-### 常规（有 dsh 源码 checkout）
+### 一条命令（推荐，本机情形）
+
+```bash
+npm run build:local          # 只看类型：npm run typecheck
+```
+
+`scripts/build-local.mjs` 自己搞定三件事，**不需要 git-bash，也不需要源码 checkout**：
+
+1. **探测依赖源**：`DSH_CHECKOUT` → `D:/dsh/dsh-pinned`（固定安装：只有 `node_modules`）→
+   `~/dsh-harness`、`~/dsh`、`~/.dsh/dsh-harness`（源码 checkout）。按"能不能拿到
+   `dsh-tools`"判定可用，然后把 `@deepseek-ai/*` 用 junction 挂进本包 `node_modules`
+   （Windows 上 junction 不需要管理员权限）。
+2. **找一个够新的 tsc**：`$DSH_TSC` → 本包 `node_modules` → 缓存目录 `.tsc-cache/` →
+   依赖源自带。都不行就下 npm tarball（只下一次，约 4MB）——**不走 `npm i`**：
+   本机 npm 装包直接崩（`Cannot read properties of null (reading 'children')`）。
+   版本 < 5 的一律弃用。
+3. **编译**：`tsc -p tsconfig.json`，并写一个 `lib/.build-stamp` 方便对照热重载前后。
+
+> 为什么不用全局 `tsc`：本机 PATH 上那个是 TypeScript **3.8.3**，不认 `target: ES2023` /
+> `module: NodeNext` / `??=`，会刷出上百条 `@deepseek-ai/*.d.ts` 语法错误 —— 那是工具链
+> 太老，不是代码有问题。
+
+### 有 dsh 源码 checkout 时
 
 ```bash
 DSH_CHECKOUT=<checkout> bash scripts/build.sh
 ```
 
-### 只有 npm 安装包时（本机情形）
-
-脚手架假设存在源码 checkout（`$CHECKOUT/packages/...`、`vendor/`、`$CHECKOUT/node_modules/.bin/tsc`）。
-本机只有 npx 缓存布局的安装包，因此：
-
-```bash
-node scripts/link-deps.mjs      # 把编译需要的 @deepseek-ai/* junction 到本插件 node_modules
-tsc -p tsconfig.json            # 用现代 tsc（TypeScript 7）；本机在 dsh-market 的 node_modules 里
-```
-
-或一条命令：`npm run build:local`
-
-> 注意：全局 `tsc` 是 TypeScript 2 时代的老版本，不认 `target: es2023` / `module: NodeNext`，
-> 会刷出成百条 `@types/node` 语法错误。请用现代 tsc。
+（脚手架生成的 `build.sh` 只认源码 checkout 布局：`$CHECKOUT/packages/...`、`vendor/`、
+`$CHECKOUT/node_modules/.bin/tsc`。上面那条 `npm run build:local` 两种布局都认。）
 
 ### 冒烟测试
 

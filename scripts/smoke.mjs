@@ -138,7 +138,10 @@ console.log(`第二次耗时      = ${Date.now() - hfSecond} ms  已记住=${hfE
 globalThis.fetch = realFetch
 
 console.log('\n=== 8. 智谱 CogView 后端（国内不用加速器那条）===')
-writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: 'test-zhipu-key' } }), 'utf8')
+// ⚠️ key 必须是"合法形态"（含点）：智谱 key 是 <32位id>.<16位secret>，
+// 形态不对会被发请求前的体检拦下（见第 9 段），这里就测不到请求体了。
+const FAKE_ZHIPU_KEY = '0123456789abcdef0123456789abcdef.abcdefghijklmnop'
+writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: FAKE_ZHIPU_KEY } }), 'utf8')
 let sawZhipu = null
 globalThis.fetch = async (url, init) => {
   const target = String(url)
@@ -180,7 +183,7 @@ for (const [w, h, want] of sizeCases) {
     }
     return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), { status: 200, headers: { 'content-type': 'image/png' } })
   }
-  writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: 'k' }, width: w, height: h }), 'utf8')
+  writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: FAKE_ZHIPU_KEY }, width: w, height: h }), 'utf8')
   await registered.execute({ prompt }, {})
   const got = sawZhipu?.body?.size
   const legal = zhipuSizes.includes(String(got))
@@ -188,5 +191,35 @@ for (const [w, h, want] of sizeCases) {
 }
 globalThis.fetch = realFetch
 console.log(`尺寸映射      = ${sizeOk ? '全对（1024x1536→864x1152、1920x1080→1344x768 …）' : '有错，见上'}`)
+
+console.log('\n=== 9. 智谱 key 只复制了半截 → 发请求前就说清楚 ===')
+// 真实翻车现场：控制台的 key 列表里 ID 和整串长得像，只复制点号前面的 32 位十六进制串，
+// 服务端只回 "401 令牌已过期或验证不正确"，很容易被误判成"要重新注册/额度没了"。
+let badKeyRequests = 0
+globalThis.fetch = async (url, init) => {
+  if (String(url).includes('open.bigmodel.cn')) badKeyRequests += 1
+  return await realFetch(url, init)
+}
+writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: '605da1b2c3d4e5f60718293a4b5c6d7e' } }), 'utf8')
+let halfKeyError = ''
+try { await registered.execute({ prompt }, {}) } catch (error) { halfKeyError = String(error?.message ?? error) }
+globalThis.fetch = realFetch
+console.log(`网络请求次数  = ${badKeyRequests}（应为 0，白跑一趟没有意义）`)
+console.log(`错误信息      = ${halfKeyError.slice(0, 120)}…`)
+console.log(`判定          = 点了名=${halfKeyError.includes('没有 "."')} 给了做法=${halfKeyError.includes('复制按钮')}`)
+// 反例：合法的点号形态不能被误伤（否则以后智谱换 key 形态就全挂）。
+let goodKeyRequests = 0
+globalThis.fetch = async (url, init) => {
+  if (String(url).includes('open.bigmodel.cn')) {
+    goodKeyRequests += 1
+    return new Response(JSON.stringify({ data: [{ url: 'https://example.invalid/fake.png' }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), { status: 200, headers: { 'content-type': 'image/png' } })
+}
+writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: FAKE_ZHIPU_KEY } }), 'utf8')
+let goodKeyValue = null
+try { goodKeyValue = await registered.execute({ prompt }, {}) } catch (error) { goodKeyValue = String(error?.message ?? error) }
+globalThis.fetch = realFetch
+console.log(`合法 key 照发 = ${goodKeyRequests === 1}  出图=${goodKeyValue?.image === undefined ? String(goodKeyValue).slice(0, 60) : goodKeyValue.model}`)
 
 console.log('\nSMOKE OK')

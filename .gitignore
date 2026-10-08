@@ -1,3 +1,5 @@
 node_modules/
 *.tsbuildinfo
 *.tgz
+.tsc-cache/
+lib/.build-stamp

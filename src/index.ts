@@ -155,6 +155,32 @@ function asMediaType(value: unknown): MediaType | undefined {
     : undefined
 }
 
+/**
+ * 按**魔数**认图片类型（只看头几个字节，不解码）。
+ *
+ * 为什么必须自己认：上游的 `Content-Type` 会说谎。实测智谱的水印 CDN 返回
+ * `Content-Type: image/png`，而字节其实是 JPEG（`ff d8 ff e0 … JFIF`）——
+ * 信响应头就会在落附件那一步被"声明类型与字节不一致"打回（真机翻过）。
+ */
+function sniffMediaType(bytes: Uint8Array): MediaType | undefined {
+  const at = (...want: number[]): boolean => want.every((byte, i) => bytes[i] === byte)
+  if (bytes.length >= 3 && at(0xff, 0xd8, 0xff)) return 'image/jpeg'
+  if (bytes.length >= 8 && at(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png'
+  if (bytes.length >= 12 && at(0x52, 0x49, 0x46, 0x46) && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    return 'image/webp'
+  }
+  if (bytes.length >= 6 && at(0x47, 0x49, 0x46, 0x38)) return 'image/gif'
+  return undefined
+}
+
+/**
+ * 定类型：**字节优先，上游声明兜底**。字节认不出来（例如上游回了 HTML 错误页）
+ * 就只接受声明的合法类型，否则返回 undefined 让调用方判失败——绝不硬塞。
+ */
+function resolveMediaType(bytes: Uint8Array, declared: string, fallback: MediaType): MediaType | undefined {
+  return sniffMediaType(bytes) ?? asMediaType(declared === '' ? fallback : declared)
+}
+
 interface Output {
   url: string
   markdown: string
@@ -237,6 +263,26 @@ interface FetchedImage {
   /** 上游首次告警（用于降档重试后仍失败时解释原因）。 */
   note?: string
   strategy: string
+  /** 在它之前失败/被跳过的后端（成功时也带出来，否则"悄悄降级"没人知道）。 */
+  skipped?: string[]
+}
+
+/**
+ * 智谱 key 的形态体检（**发请求之前**做，省一次白跑的网络往返）。
+ *
+ * 为什么值得单独写：智谱 key 是 `<32位十六进制 id>.<16位 secret>` 两段用点连接，
+ * 但控制台的 key 列表里"ID"和整串长得很像 —— 只复制点号前面那段是极高发的翻车点，
+ * 而且服务端只回一句 `401 令牌已过期或验证不正确`（README 里"过期/不正确"两个词都在，
+ * 极易被误判成"额度没了/要重新注册"，实际是复制少了半截）。
+ */
+function zhipuKeyProblem(key: string): string | undefined {
+  if (key.includes('.')) return undefined
+  return (
+    `zhipu.key 格式不对：现在这串是 ${key.length} 位、且没有 "." —— ` +
+    '智谱 key 形如 <32位id>.<16位secret>（约 49 位，中间必须有一个点），' +
+    '多半是只复制了点号前面的 ID 段。请到 https://bigmodel.cn/usercenter/proj-mgmt/apikeys ' +
+    '点 key 右侧的复制按钮取「整串」'
+  )
 }
 
 /** 上游当前免费档开放的模型（GET {endpoint 同源}/models）。失败返回空数组。 */
@@ -316,16 +362,16 @@ async function fetchFromPollinations(
       continue
     }
     const declared = (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
-    const mediaType = asMediaType(declared === '' ? 'image/jpeg' : declared)
-    if (mediaType === undefined) {
-      firstNote ??= `content-type ${declared || '未知'} 不受支持`
-      failures.push(`${strategy.label}:content-type ${declared || '未知'}`)
-      continue
-    }
     const data = new Uint8Array(await response.arrayBuffer())
     if (data.byteLength === 0) {
       firstNote ??= '接口返回空内容'
       failures.push(`${strategy.label}:空内容`)
+      continue
+    }
+    const mediaType = resolveMediaType(data, declared, 'image/jpeg')
+    if (mediaType === undefined) {
+      firstNote ??= `content-type ${declared || '未知'} 不受支持`
+      failures.push(`${strategy.label}:content-type ${declared || '未知'}`)
       continue
     }
     return {
@@ -421,10 +467,10 @@ async function fetchFromHuggingFace(
   const file = await fetch(imageUrl, { signal: AbortSignal.timeout(timeoutMs) })
   if (!file.ok) throw new Error(`取回图片失败 HTTP ${file.status}`)
   const declared = (file.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
-  const mediaType = asMediaType(declared === '' ? 'image/webp' : declared)
-  if (mediaType === undefined) throw new Error(`Space 返回的 ${declared || '未知'} 不受支持`)
   const data = new Uint8Array(await file.arrayBuffer())
   if (data.byteLength === 0) throw new Error('Space 返回空图片')
+  const mediaType = resolveMediaType(data, declared, 'image/webp')
+  if (mediaType === undefined) throw new Error(`Space 返回的 ${declared || '未知'} 不受支持`)
 
   return { data, mediaType, url: imageUrl, model: `flux-schnell(${space})`, strategy }
 }
@@ -479,6 +525,8 @@ async function fetchFromZhipu(
   if (key === '') {
     throw new Error('未配置 zhipu.key（https://open.bigmodel.cn 免费注册，送额度、cogview-3-flash 免费）')
   }
+  const problem = zhipuKeyProblem(key)
+  if (problem !== undefined) throw new Error(problem)
   const baseUrl = (config.zhipu?.baseUrl || 'https://open.bigmodel.cn/api/paas/v4').replace(/\/+$/, '')
   const model = config.zhipu?.model || 'cogview-3-flash'
   const strategy = `智谱 ${model}`
@@ -500,14 +548,16 @@ async function fetchFromZhipu(
     const file = await fetch(first.url, { signal: AbortSignal.timeout(timeoutMs) })
     if (!file.ok) throw new Error(`取回图片失败 HTTP ${file.status}`)
     const declared = (file.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
-    const mediaType = asMediaType(declared === '' ? 'image/png' : declared)
+    const data = new Uint8Array(await file.arrayBuffer())
+    // ⚠️ 智谱 CDN 的头写 image/png 而字节是 JPEG，只能按字节认。
+    const mediaType = resolveMediaType(data, declared, 'image/png')
     if (mediaType === undefined) throw new Error(`返回的 ${declared || '未知'} 不受支持`)
-    return { data: new Uint8Array(await file.arrayBuffer()), mediaType, url: first.url, model, strategy }
+    return { data, mediaType, url: first.url, model, strategy }
   }
   if (typeof first.b64_json === 'string' && first.b64_json !== '') {
     const data = new Uint8Array(Buffer.from(first.b64_json, 'base64'))
     if (data.byteLength === 0) throw new Error('base64 解码后为空')
-    return { data, mediaType: 'image/png', url: `${baseUrl}/images/generations`, model, strategy }
+    return { data, mediaType: resolveMediaType(data, '', 'image/png') ?? 'image/png', url: `${baseUrl}/images/generations`, model, strategy }
   }
   throw new Error('响应里既没有 url 也没有 b64_json')
 }
@@ -553,15 +603,16 @@ async function fetchFromTogether(
   if (typeof first.b64_json === 'string' && first.b64_json !== '') {
     const data = new Uint8Array(Buffer.from(first.b64_json, 'base64'))
     if (data.byteLength === 0) throw new Error('base64 解码后为空')
-    return { data, mediaType: 'image/png', url: `${baseUrl}/images/generations`, model, strategy }
+    return { data, mediaType: resolveMediaType(data, '', 'image/png') ?? 'image/png', url: `${baseUrl}/images/generations`, model, strategy }
   }
   if (typeof first.url === 'string' && first.url !== '') {
     const file = await fetch(first.url, { signal: AbortSignal.timeout(timeoutMs) })
     if (!file.ok) throw new Error(`取回图片失败 HTTP ${file.status}`)
     const declared = (file.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
-    const mediaType = asMediaType(declared === '' ? 'image/jpeg' : declared)
+    const data = new Uint8Array(await file.arrayBuffer())
+    const mediaType = resolveMediaType(data, declared, 'image/jpeg')
     if (mediaType === undefined) throw new Error(`返回的 ${declared || '未知'} 不受支持`)
-    return { data: new Uint8Array(await file.arrayBuffer()), mediaType, url: first.url, model, strategy }
+    return { data, mediaType, url: first.url, model, strategy }
   }
   throw new Error('响应里既没有 b64_json 也没有 url')
 }
@@ -586,11 +637,15 @@ async function fetchImage(
     // 后端之间也留一点间隔：pollinations 限流时立刻换家反而更稳（各家队列独立）。
     if (index > 0) await new Promise((resolve) => setTimeout(resolve, 1500))
     try {
-      if (provider === 'zhipu') return await fetchFromZhipu(config, prompt, o, timeoutMs)
-      if (provider === 'together') return await fetchFromTogether(config, prompt, o, timeoutMs)
-      if (provider === 'huggingface') return await fetchFromHuggingFace(config, prompt, o, timeoutMs)
-      if (provider === 'pollinations') return await fetchFromPollinations(config, prompt, o, timeoutMs)
-      failures.push(`${provider}: 未知后端`)
+      const image =
+        provider === 'zhipu' ? await fetchFromZhipu(config, prompt, o, timeoutMs)
+        : provider === 'together' ? await fetchFromTogether(config, prompt, o, timeoutMs)
+        : provider === 'huggingface' ? await fetchFromHuggingFace(config, prompt, o, timeoutMs)
+        : provider === 'pollinations' ? await fetchFromPollinations(config, prompt, o, timeoutMs)
+        : undefined
+      if (image === undefined) { failures.push(`${provider}: 未知后端`); continue }
+      // 前面有后端挂了/被跳过才带 skipped：让"其实是用兜底出的图"这件事浮到 note 上。
+      return failures.length === 0 ? image : { ...image, skipped: failures }
     } catch (error) {
       failures.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -826,6 +881,7 @@ export function apply(ctx: Context, config: Config): void {
       const notes = [
         local.note,
         fetched.note === undefined ? '' : `已降档重试（${fetched.strategy}）；首次请求：${fetched.note}`,
+        (fetched.skipped ?? []).length === 0 ? '' : `本次是用兜底后端出的图，前面没成：${(fetched.skipped ?? []).join('；')}`,
       ].filter((entry) => entry !== '')
 
       return {
