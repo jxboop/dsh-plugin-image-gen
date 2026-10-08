@@ -1,0 +1,13 @@
+﻿{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "react": ["D:/dsh/dsh-home/plugin-src/dsh-plugin-agent-workflow/node_modules/@types/react/index.d.ts"],
+      "react/*": ["D:/dsh/dsh-home/plugin-src/dsh-plugin-agent-workflow/node_modules/@types/react/*"]
+    },
+    "types": ["node"],
+    "skipLibCheck": true
+  },
+  "include": ["src/client/**/*.ts"]
+}
