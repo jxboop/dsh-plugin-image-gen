@@ -11,12 +11,14 @@ interface SharpInstance {
         height: number;
     }): SharpInstance;
     removeAlpha(): SharpInstance;
+    flop(): SharpInstance;
     greyscale(): SharpInstance;
     raw(): SharpInstance;
     png(): SharpInstance;
     jpeg(options?: {
         quality?: number;
     }): SharpInstance;
+    joinChannel(channel: Buffer, options: unknown): SharpInstance;
     composite(inputs: Array<{
         input: Buffer;
         left?: number;
@@ -48,8 +50,12 @@ export declare function watermarkBox(width: number, height: number): {
     height: number;
 };
 export interface DewatermarkOptions {
-    /** `inpaint`（默认）扩散修补；`crop` 直接裁掉最下面 10%（角落纹理复杂时最稳）。 */
-    mode?: 'inpaint' | 'crop';
+    /**
+     * `auto`（默认）：按角落的对比度自己挑 —— 平滑背景用 `inpaint`（扩散修补），
+     * 高对比线稿用 `mirror`（镜像，保留线条质感）。
+     * 也可以强制 `inpaint` / `mirror` / `patch` / `crop`（crop 直接裁掉最下面 10%）。
+     */
+    mode?: 'auto' | 'inpaint' | 'mirror' | 'patch' | 'crop';
     quality?: number;
     box?: {
         left: number;

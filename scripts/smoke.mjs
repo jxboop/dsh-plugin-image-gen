@@ -299,4 +299,54 @@ console.log('\n=== 10. 出图后本地抹掉智谱的「AI生成」角标 ===')
   writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: FAKE_ZHIPU_KEY } }), 'utf8')
 }
 
+console.log('\n=== 11. 水印模式的自动选择（平滑背景→扩散修补；黑白线稿→镜像）===')
+/*
+ * 现场（2026-10-08）：一张黑白漫画风的图，扩散修补在右下角留下一块**灰斑** —— 线稿在那个
+ * 尺度上没法被"解"出来。改用镜像（把左侧那条带翻过来）会保留黑白线条的质感，自然得多。
+ * 顺带修一个真 bug：移植到 TS 时把 `mirror` 分支整个丢了（CLI 还写着有这个模式，跑出来却
+ * 和 inpaint 逐字节一样）。
+ */
+{
+  const sharp = loadSharp()
+  const { dewatermark } = await import('../lib/dewatermark.js')
+  const box = { left: 819, top: 922, width: 205, height: 102 }
+  // 高对比：右上角画粗黑白条纹 + 右下角一块黑（模拟线稿角落）
+  const stripes = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024">` +
+    `<rect width="1024" height="1024" fill="#fff"/>` +
+    `<g fill="#000">${Array.from({ length: 60 }, (_, i) => `<rect x="${i * 17}" y="0" width="8" height="900"/>`).join('')}</g>` +
+    `<rect x="600" y="760" width="424" height="264" fill="#000"/>` +
+    `<rect x="700" y="880" width="200" height="100" fill="#888"/></svg>`)
+  const lineArt = await sharp(stripes).jpeg({ quality: 95 }).toBuffer()
+  // 平滑背景：淡淡渐变 + 一块水印
+  const smoothBase = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: { r: 208, g: 212, b: 216 } } }).jpeg({ quality: 95 }).toBuffer()
+  const mark = await sharp({ create: { width: 185, height: 78, channels: 4, background: { r: 90, g: 90, b: 90, alpha: 1 } } }).png().toBuffer()
+  const smooth = await sharp(smoothBase).composite([{ input: mark, left: box.left + 10, top: box.top + 12 }]).jpeg({ quality: 95 }).toBuffer()
+
+  const bytesOf = async (input, mode) => Buffer.from(await dewatermark(input, { mode }))
+  const same = (a, b) => a.length === b.length && Buffer.compare(a, b) === 0
+
+  const lineAuto = await bytesOf(lineArt, 'auto')
+  const lineMirror = await bytesOf(lineArt, 'mirror')
+  const lineInpaint = await bytesOf(lineArt, 'inpaint')
+  console.log(`线稿：auto=mirror ? ${same(lineAuto, lineMirror)}（auto≠inpaint：${same(lineAuto, lineInpaint) === false}）`)
+  console.log(`mirror 真的不一样了 ? ${same(lineMirror, lineInpaint) === false}（这就是之前丢掉的模式）`)
+
+  const smoothAuto = await bytesOf(smooth, 'auto')
+  const smoothInpaint = await bytesOf(smooth, 'inpaint')
+  console.log(`平滑背景：auto=inpaint ? ${same(smoothAuto, smoothInpaint)}`)
+
+  // 两种模式都不能把角落以外的地方改坏（只准动那个框）。
+  const outside = { left: 0, top: box.top - 140, width: 1024, height: 130 }
+  const diffOutside = async (a, b) => {
+    const one = await sharp(a).extract(outside).removeAlpha().raw().toBuffer()
+    const two = await sharp(b).extract(outside).removeAlpha().raw().toBuffer()
+    let sum = 0
+    for (let i = 0; i < one.length; i += 1) sum += Math.abs(one[i] - two[i])
+    return sum / one.length
+  }
+  console.log(`线稿框外变化 = ${(await diffOutside(lineArt, lineAuto)).toFixed(3)}（应≈0）`)
+  console.log(`平滑框外变化 = ${(await diffOutside(smooth, smoothAuto)).toFixed(3)}（应≈0）`)
+}
+
 console.log('\nSMOKE OK')
