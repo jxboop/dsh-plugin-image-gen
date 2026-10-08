@@ -38,12 +38,14 @@ export interface Config {
   safe: boolean
   /** 可选 pollinations token（空字符串 = 匿名档）。 */
   token: string
-  /** 后端顺序（'huggingface' | 'pollinations'）。 */
+  /** 后端顺序（'zhipu' | 'together' | 'huggingface' | 'pollinations'）。 */
   providers: string[]
   /** HF Space 后端配置。 */
   huggingface: { space: string; steps: number }
   /** Together.ai（OpenAI 兼容）后端配置。 */
   together: { key: string; baseUrl: string; model: string; steps: number }
+  /** 智谱 BigModel（CogView）后端配置：国内直连可用，注册送额度，cogview-3-flash 免费。 */
+  zhipu: { key: string; baseUrl: string; model: string }
   attach: boolean
   timeoutMs: number
   /**
@@ -121,6 +123,19 @@ export const Config = z.object({
     baseUrl: z.string().default('https://api.together.xyz/v1'),
     model: z.string().default('black-forest-labs/FLUX.1-schnell-Free'),
     steps: z.number().default(4),
+  }),
+  /**
+   * 智谱 BigModel（CogView）后端 —— **国内不用加速器就能用的那条路**：
+   * 域名 `open.bigmodel.cn` 直连可达（实测 401 = 通），注册送额度，
+   * 其中 `cogview-3-flash` 是**免费模型**。
+   *
+   * 免费注册 https://open.bigmodel.cn → 拿 API key 填 `zhipu.key`，再把 'zhipu'
+   * 放进 providers 首位。key 为空时该后端自动跳过。
+   */
+  zhipu: z.object({
+    key: z.string().default(''),
+    baseUrl: z.string().default('https://open.bigmodel.cn/api/paas/v4'),
+    model: z.string().default('cogview-3-flash'),
   }),
   timeoutMs: z.number().default(60000),
   /**
@@ -415,6 +430,59 @@ async function fetchFromHuggingFace(
 }
 
 /**
+ * 智谱 BigModel（CogView）后端：`POST {baseUrl}/images/generations`。
+ *
+ * 为什么单开一个后端、不复用 Together 那条"OpenAI 兼容"：
+ * 智谱的**请求体不一样** —— 尺寸要 `size: "1024x1024"` 字符串，不吃 `width/height/steps/n/
+ * response_format` 那些字段，硬套过去会被判非法。返回体倒是兼容（`data[0].url`）。
+ *
+ * 这条路对国内用户最实用：`open.bigmodel.cn` **直连可达**（实测 401 = 通，不需要加速器），
+ * 注册送额度，`cogview-3-flash` 是免费模型。
+ */
+async function fetchFromZhipu(
+  config: Config,
+  prompt: string,
+  o: { width: number; height: number; seed?: number },
+  timeoutMs: number,
+): Promise<FetchedImage> {
+  const key = typeof config.zhipu?.key === 'string' ? config.zhipu.key.trim() : ''
+  if (key === '') {
+    throw new Error('未配置 zhipu.key（https://open.bigmodel.cn 免费注册，送额度、cogview-3-flash 免费）')
+  }
+  const baseUrl = (config.zhipu?.baseUrl || 'https://open.bigmodel.cn/api/paas/v4').replace(/\/+$/, '')
+  const model = config.zhipu?.model || 'cogview-3-flash'
+  const strategy = `智谱 ${model}`
+
+  const res = await fetch(`${baseUrl}/images/generations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+    // 智谱只要这三个字段（多塞会被判非法）。尺寸用 `1024x1024` 这种字符串格式。
+    body: JSON.stringify({ model, prompt, size: `${o.width}x${o.height}` }),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}（${(await res.text().catch(() => '')).slice(0, 160)}）`)
+
+  const body = (await res.json()) as { data?: Array<{ url?: string; b64_json?: string }> }
+  const first = body.data?.[0]
+  if (first === undefined) throw new Error('响应里没有 data[0]')
+
+  if (typeof first.url === 'string' && first.url !== '') {
+    const file = await fetch(first.url, { signal: AbortSignal.timeout(timeoutMs) })
+    if (!file.ok) throw new Error(`取回图片失败 HTTP ${file.status}`)
+    const declared = (file.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
+    const mediaType = asMediaType(declared === '' ? 'image/png' : declared)
+    if (mediaType === undefined) throw new Error(`返回的 ${declared || '未知'} 不受支持`)
+    return { data: new Uint8Array(await file.arrayBuffer()), mediaType, url: first.url, model, strategy }
+  }
+  if (typeof first.b64_json === 'string' && first.b64_json !== '') {
+    const data = new Uint8Array(Buffer.from(first.b64_json, 'base64'))
+    if (data.byteLength === 0) throw new Error('base64 解码后为空')
+    return { data, mediaType: 'image/png', url: `${baseUrl}/images/generations`, model, strategy }
+  }
+  throw new Error('响应里既没有 url 也没有 b64_json')
+}
+
+/**
  * Together.ai（OpenAI 兼容）后端取图：`POST {baseUrl}/images/generations`。
  * 返回体里的 `data[0].b64_json`（或 `url`）即图片。**有 key 时这是最稳的一条路**：
  * `black-forest-labs/FLUX.1-schnell-Free` 官方标注免费无限量（按请求限速）。
@@ -488,6 +556,7 @@ async function fetchImage(
     // 后端之间也留一点间隔：pollinations 限流时立刻换家反而更稳（各家队列独立）。
     if (index > 0) await new Promise((resolve) => setTimeout(resolve, 1500))
     try {
+      if (provider === 'zhipu') return await fetchFromZhipu(config, prompt, o, timeoutMs)
       if (provider === 'together') return await fetchFromTogether(config, prompt, o, timeoutMs)
       if (provider === 'huggingface') return await fetchFromHuggingFace(config, prompt, o, timeoutMs)
       if (provider === 'pollinations') return await fetchFromPollinations(config, prompt, o, timeoutMs)
@@ -499,7 +568,8 @@ async function fetchImage(
 
   throw new Error(
     `image_generate: 取图失败，${order.length} 个后端均未成；明细：${failures.join('；')}` +
-      '（免费匿名后端近期余额/配额不稳：填入 together.key（免费无限量）并把 providers 设为 ["together"] 可稳定出图，或稍后重试）',
+      '（要稳定出图：国内推荐智谱 cogview-3-flash（https://open.bigmodel.cn 免费注册，' +
+      'key 填 zhipu.key、providers 设 ["zhipu"]）；有加速器可用 together.key；或稍后重试）',
   )
 }
 
@@ -520,14 +590,16 @@ const LOCAL_CONFIG_FILE = 'image-gen.json'
 /** 允许被本地文件覆盖的键。`toolTimeoutMs` 故意不在内：工具超时必须在注册时就定下来。 */
 const LOCAL_KEYS = new Set([
   'endpoint', 'width', 'height', 'model', 'enhance', 'private', 'nologo', 'token',
-  'providers', 'huggingface', 'together', 'attach', 'timeoutMs',
+  'providers', 'huggingface', 'together', 'zhipu', 'attach', 'timeoutMs',
 ])
 
 const LOCAL_TEMPLATE = `${JSON.stringify({
   _说明: '这个文件覆盖插件的默认配置；改完【下一次出图就生效】，不用重启 DSH。',
-  _想稳定出图: '去 https://api.together.xyz 免费注册拿 key → 填进 together.key → 把 providers 改成 ["together"]。',
-  _pollinations_token: 'https://auth.pollinations.ai 免费注册拿 token 填进 token，比匿名档稳（匿名约 15 秒一条）。',
+  _国内最稳: '去 https://open.bigmodel.cn 免费注册（送额度，cogview-3-flash 免费）→ key 填进 zhipu.key → providers 改成 ["zhipu"]。不用加速器。',
+  _有加速器: '去 https://api.together.xyz 免费注册拿 key → 填进 together.key → providers 改成 ["together"]（1-3 秒出图）。',
+  _pollinations_token: 'https://gen.pollinations.ai 免费注册拿 token 填进 token，比匿名档稳（匿名约 15 秒一条）。',
   providers: ['pollinations', 'huggingface'],
+  zhipu: { key: '' },
   together: { key: '' },
   token: '',
   model: 'flux',
@@ -588,7 +660,7 @@ async function withLocalConfig(base: Config): Promise<{ config: Config; note: st
     if (key.startsWith('_')) continue
     if (LOCAL_KEYS.has(key) === false) { unknownKeys.push(key); continue }
     if (value === undefined || value === null) continue
-    if (key === 'together' || key === 'huggingface') {
+    if (key === 'together' || key === 'huggingface' || key === 'zhipu') {
       if (typeof value !== 'object' || Array.isArray(value)) { unknownKeys.push(key); continue }
       merged[key] = { ...(base[key] as unknown as Record<string, unknown>), ...(value as Record<string, unknown>) }
       continue

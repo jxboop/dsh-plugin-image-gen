@@ -137,4 +137,33 @@ try { await hfOnly.execute({ prompt }, {}) } catch (error) { hfError2 = String(e
 console.log(`第二次耗时      = ${Date.now() - hfSecond} ms  已记住=${hfError2.includes('已记住')}`)
 globalThis.fetch = realFetch
 
+console.log('\n=== 8. 智谱 CogView 后端（国内不用加速器那条）===')
+writeFileSync(localConfigPath, JSON.stringify({ providers: ['zhipu'], zhipu: { key: 'test-zhipu-key' } }), 'utf8')
+let sawZhipu = null
+globalThis.fetch = async (url, init) => {
+  const target = String(url)
+  if (target.includes('open.bigmodel.cn')) {
+    sawZhipu = { url: target, body: JSON.parse(String(init?.body ?? '{}')), auth: String(init?.headers?.authorization ?? '') }
+    return new Response(JSON.stringify({ data: [{ url: 'https://example.invalid/fake.png' }] }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })
+  }
+  if (target.includes('example.invalid')) {
+    return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), {
+      status: 200, headers: { 'content-type': 'image/png' },
+    })
+  }
+  return await realFetch(url, init)
+}
+let zhipuValue = null
+let zhipuError = ''
+try { zhipuValue = await registered.execute({ prompt }, {}) } catch (error) { zhipuError = String(error?.message ?? error) }
+globalThis.fetch = realFetch
+console.log(`请求 url      = ${sawZhipu?.url ?? '(没发出去)'}`)
+console.log(`请求体        = ${JSON.stringify(sawZhipu?.body)}`)
+console.log(`带 Bearer     = ${(sawZhipu?.auth ?? '').startsWith('Bearer ')}`)
+console.log(`size 是字符串 = ${/^\d+x\d+$/.test(String(sawZhipu?.body?.size))}`)
+console.log(`只塞三个字段  = ${sawZhipu !== null && JSON.stringify(Object.keys(sawZhipu.body).sort()) === '["model","prompt","size"]'}`)
+console.log(`出图解析      = ${zhipuValue?.image === undefined ? '没拿到图 ' + zhipuError : '拿到图 ' + zhipuValue.image.mediaType + ' / ' + zhipuValue.model}`)
+
 console.log('\nSMOKE OK')

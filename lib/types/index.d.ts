@@ -13,7 +13,7 @@ export interface Config {
     safe: boolean;
     /** 可选 pollinations token（空字符串 = 匿名档）。 */
     token: string;
-    /** 后端顺序（'huggingface' | 'pollinations'）。 */
+    /** 后端顺序（'zhipu' | 'together' | 'huggingface' | 'pollinations'）。 */
     providers: string[];
     /** HF Space 后端配置。 */
     huggingface: {
@@ -26,6 +26,12 @@ export interface Config {
         baseUrl: string;
         model: string;
         steps: number;
+    };
+    /** 智谱 BigModel（CogView）后端配置：国内直连可用，注册送额度，cogview-3-flash 免费。 */
+    zhipu: {
+        key: string;
+        baseUrl: string;
+        model: string;
     };
     attach: boolean;
     timeoutMs: number;
@@ -113,6 +119,23 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
         model: z<string, string, "defined">;
         steps: z<number, number, "defined">;
     }>>, "plain">;
+    /**
+     * 智谱 BigModel（CogView）后端 —— **国内不用加速器就能用的那条路**：
+     * 域名 `open.bigmodel.cn` 直连可达（实测 401 = 通），注册送额度，
+     * 其中 `cogview-3-flash` 是**免费模型**。
+     *
+     * 免费注册 https://open.bigmodel.cn → 拿 API key 填 `zhipu.key`，再把 'zhipu'
+     * 放进 providers 首位。key 为空时该后端自动跳过。
+     */
+    zhipu: z<Schemastery.ObjectS<NoInfer<{
+        key: z<string, string, "defined">;
+        baseUrl: z<string, string, "defined">;
+        model: z<string, string, "defined">;
+    }>>, Schemastery.ObjectT<NoInfer<{
+        key: z<string, string, "defined">;
+        baseUrl: z<string, string, "defined">;
+        model: z<string, string, "defined">;
+    }>>, "plain">;
     timeoutMs: z<number, number, "defined">;
     /**
      * 工具级总预算：默认 3 分钟，够"取图 + 落附件"这类正常调用，又短到
@@ -194,6 +217,23 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
         baseUrl: z<string, string, "defined">;
         model: z<string, string, "defined">;
         steps: z<number, number, "defined">;
+    }>>, "plain">;
+    /**
+     * 智谱 BigModel（CogView）后端 —— **国内不用加速器就能用的那条路**：
+     * 域名 `open.bigmodel.cn` 直连可达（实测 401 = 通），注册送额度，
+     * 其中 `cogview-3-flash` 是**免费模型**。
+     *
+     * 免费注册 https://open.bigmodel.cn → 拿 API key 填 `zhipu.key`，再把 'zhipu'
+     * 放进 providers 首位。key 为空时该后端自动跳过。
+     */
+    zhipu: z<Schemastery.ObjectS<NoInfer<{
+        key: z<string, string, "defined">;
+        baseUrl: z<string, string, "defined">;
+        model: z<string, string, "defined">;
+    }>>, Schemastery.ObjectT<NoInfer<{
+        key: z<string, string, "defined">;
+        baseUrl: z<string, string, "defined">;
+        model: z<string, string, "defined">;
     }>>, "plain">;
     timeoutMs: z<number, number, "defined">;
     /**

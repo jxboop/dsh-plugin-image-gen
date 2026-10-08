@@ -56,19 +56,20 @@ dsh plugin --profile web add <本仓库的绝对路径>
 
 - 这里的键**优先于**组合配置（`cordis.patch.yml`）；不写就用默认值。
 - 支持：`endpoint` `width` `height` `model` `enhance` `private` `nologo` `token` `providers`
-  `huggingface` `together` `attach` `timeoutMs`
+  `huggingface` `together` `zhipu` `attach` `timeoutMs`
   （`toolTimeoutMs` 只能在组合里改 —— 工具超时必须注册时就定下来）。
 - 嵌套的 `together` / `huggingface` 做**浅合并**：只写 `together.key` 就够，不必把 `baseUrl` / `model` 抄一遍。
 - 写坏了不会崩：那次生成按默认配置走，并在结果里回一句话告诉你哪儿不对
   （"不是合法 JSON""有不认识的键"…）。
 
-### 三条路怎么选（按你的网络）
+### 四条路怎么选（按你的网络）
 
 | 你的情况 | 建议 |
 |---|---|
-| 国内网络、不想折腾 | **保持默认**：`providers: ["pollinations","huggingface"]`。pollinations 在国内**可直连**；HF 通常连不上，但插件会**探一下、不通就跳过**（不会白等） |
-| 想更稳一点 | 去 <https://auth.pollinations.ai> 免费注册拿 token，填进 `token`（**注册那一下要翻，之后出图不用**） |
-| 有加速器 / 在海外 | 去 <https://api.together.xyz> 免费注册拿 key，填 `together.key`，并把 `providers` 改成 `["together"]`（最快最稳，出图 1–3 秒） |
+| **国内、想稳定**（推荐） | 去 <https://open.bigmodel.cn> **免费注册**（送额度，`cogview-3-flash` 免费）→ key 填 `zhipu.key`，`providers` 改成 `["zhipu"]`。**不用加速器**（`open.bigmodel.cn` 国内直连，实测 401 = 通） |
+| 国内、不想注册 | **保持默认**：`providers: ["pollinations","huggingface"]`。pollinations 国内可直连；HF 通常连不上，但插件会**探一下、不通就跳过**（不会白等） |
+| 想再稳一点（不注册智谱） | 去 <https://gen.pollinations.ai> 免费注册拿 token，填进 `token` |
+| 有加速器 / 在海外 | 去 <https://api.together.xyz> 免费注册拿 key，填 `together.key`，`providers` 改成 `["together"]`（最快，1–3 秒出图）。⚠️ 它的 API 域名在国内**被 Cloudflare 按 IP 挡**（带 key 也是 403），必须挂着加速器用 |
 
 > 高级做法：也可以直接改组合配置里的装配行（`~/.dsh/profiles/<你的 profile>/cordis.patch.yml`）：
 >
@@ -123,7 +124,10 @@ markdown 图片能不能渲染取决于 GUI 渲染器与 CSP；**附件是 DSH �
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `providers` | `['pollinations','huggingface']` | 后端顺序，按序尝试。可填 `together` / `huggingface` / `pollinations` |
+| `providers` | `['pollinations','huggingface']` | 后端顺序，按序尝试。可填 `zhipu` / `together` / `huggingface` / `pollinations` |
+| `zhipu.key` | `''` | **智谱 BigModel 的 key（国内推荐：直连可用、注册送额度、`cogview-3-flash` 免费）** |
+| `zhipu.baseUrl` | `https://open.bigmodel.cn/api/paas/v4` | 智谱端点 |
+| `zhipu.model` | `cogview-3-flash` | 免费模型；要更好画质可换 `cogview-3` / `cogview-3-plus`（计费） |
 | `endpoint` | `https://image.pollinations.ai/prompt/` | pollinations 接口前缀，prompt 以 URL 编码追加其后 |
 | `model` | `flux` | pollinations 模型 |
 | `width` / `height` | 1024 / 1024 | 默认尺寸（等于上游默认值；默认尺寸下**不写进 URL**，见下） |

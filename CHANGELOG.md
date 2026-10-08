@@ -4,6 +4,25 @@
 
 ---
 
+## 1.2.0 — 2026-10-08
+
+### 新增
+
+**智谱 BigModel（CogView）后端 —— 国内不用加速器就能稳定出图的那条路**
+
+- 新后端 `zhipu`：`POST {baseUrl}/images/generations`，`size: "1024x1024"` 字符串格式，
+  默认模型 **`cogview-3-flash`（免费）**。
+- 为什么单开一个后端、不复用"OpenAI 兼容"那条：**智谱的请求体不一样** ——
+  尺寸要 `size` 字符串，不吃 `width/height/steps/n/response_format`，硬套会被判非法。
+- 为什么是它：实测 `open.bigmodel.cn` 在国内**直连可达**（401 = 通，不需要加速器），
+  注册送额度、有免费模型。对比之下 Together 的 API 域名在国内**被 Cloudflare 按 IP 挡**
+  （带 key 也是 403），HF 主站直接超时。
+- 用法：<https://open.bigmodel.cn> 免费注册 → 拿 key 填 `zhipu.key` → `providers` 改成 `["zhipu"]`。
+
+### 改
+
+- 本地配置模板里加上 `zhipu.key` 和对应说明；取图失败时的提示也改成"国内推荐智谱"。
+
 ## 1.1.0 — 2026-10-08
 
 ### 新增
