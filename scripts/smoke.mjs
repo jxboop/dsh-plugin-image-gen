@@ -6,7 +6,15 @@
  *
  * 用法：node scripts/smoke.mjs ["英文提示词"]
  */
+import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { apply, name, inject, Config } from '../lib/index.js'
+
+// 本地配置文件默认写在 $DSH_HOME/image-gen.json —— 跑测试时把它指到临时目录，
+// 免得污染使用者真实的 ~/.dsh。
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-imagegen-smoke-'))
+const localConfigPath = join(process.env.DSH_HOME, 'image-gen.json')
 
 const prompt = process.argv[2] ?? 'a red panda astronaut floating in a neon nebula, cinematic lighting, highly detailed'
 
@@ -84,5 +92,49 @@ const textOnly = await registered.execute({ prompt, attach: false }, {})
 console.log(`url     = ${textOnly.url}`)
 console.log(`image   = ${textOnly.image === undefined ? 'undefined（未取图）' : 'present'}`)
 console.log(`blocks  = ${JSON.stringify(registered.output.render({}, textOnly).map((b) => b.type))}`)
+
+console.log('\n=== 6. 本地配置文件（~/.dsh/image-gen.json）===')
+console.log(`模板已自动生成 = ${existsSync(localConfigPath)}  (${localConfigPath})`)
+// 覆盖生效：只改 model，看 URL 里是不是真的变了（attach=false 不取图，最快）。
+writeFileSync(localConfigPath, JSON.stringify({ model: 'sana', _说明: '测试', 不认识的键: 1 }), 'utf8')
+const overridden = await registered.execute({ prompt, attach: false }, {})
+console.log(`覆盖后 url      = ${overridden.url}`)
+console.log(`覆盖生效        = ${String(overridden.url).includes('model=sana')}`)
+console.log(`未知键有提示    = ${String(overridden.note ?? '').includes('不认识的键')}  note=${overridden.note ?? '(无)'}`)
+// 写坏了也不能把功能带崩：报一句、按默认继续。
+writeFileSync(localConfigPath, '{ 这不是 JSON', 'utf8')
+const broken = await registered.execute({ prompt, attach: false }, {})
+console.log(`坏文件仍能用    = ${typeof broken.url === 'string' && broken.url !== ''}`)
+console.log(`坏文件有提示    = ${String(broken.note ?? '').includes('不是合法 JSON')}`)
+writeFileSync(localConfigPath, JSON.stringify({ providers: ['pollinations', 'huggingface'] }), 'utf8')
+
+console.log('\n=== 7. HF 连不通就快速跳过（国内网络必然遇到）===')
+// ⚠️ 本地配置文件**优先于**组合配置 —— 第 6 段往里写了 providers，这里得同步改，
+// 否则测的就不是 HF 那条路了（第一次就踩了这个）。
+writeFileSync(localConfigPath, JSON.stringify({ providers: ['huggingface'] }), 'utf8')
+const realFetch = globalThis.fetch
+globalThis.fetch = async (url, init) => {
+  if (String(url).includes('huggingface.co')) throw new Error('getaddrinfo ENOTFOUND huggingface.co')
+  return await realFetch(url, init)
+}
+let hfOnly
+apply({ ...ctx, tools: { register(tool) { hfOnly = tool; return () => {} } } }, {
+  endpoint: 'https://image.pollinations.ai/prompt/',
+  width: 512, height: 512, model: 'flux', enhance: false, private: false, nologo: true, safe: true,
+  // 必须 attach=true：attach=false 那条分支压根不取图（只拼 URL），测不到 HF。
+  attach: true, timeoutMs: 60000, providers: ['huggingface'],
+})
+const hfStart = Date.now()
+let hfError = ''
+try { await hfOnly.execute({ prompt }, {}) } catch (error) { hfError = String(error?.message ?? error) }
+const hfMs = Date.now() - hfStart
+console.log(`首次耗时        = ${hfMs} ms（探到不通就跳过，不该等满 60s）`)
+console.log(`错误信息        = ${hfError.slice(0, 90)}`)
+console.log(`判定            = 快=${hfMs < 12000} 说的是连不上=${hfError.includes('连不上')}`)
+const hfSecond = Date.now()
+let hfError2 = ''
+try { await hfOnly.execute({ prompt }, {}) } catch (error) { hfError2 = String(error?.message ?? error) }
+console.log(`第二次耗时      = ${Date.now() - hfSecond} ms  已记住=${hfError2.includes('已记住')}`)
+globalThis.fetch = realFetch
 
 console.log('\nSMOKE OK')

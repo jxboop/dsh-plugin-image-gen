@@ -15,6 +15,9 @@
  *   请求装配会走 dsh-llm 的 projectImagesForTextModel 把它投影成文本句柄，
  *   不会报错、GUI 仍从会话日志渲染附件。不需要我看图时传 attach=false 即可。
  */
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { AttachmentId, type ImageAttachmentRef, type ImageMediaType } from '@deepseek-ai/dsh-attachment'
@@ -100,7 +103,7 @@ export const Config = z.object({
    * 详见下面 nologo 字段说明）。
    * 可选值：'pollinations' | 'huggingface' | 'together'。
    */
-  providers: z.array(z.string()).default(['huggingface', 'pollinations']),
+  providers: z.array(z.string()).default(['pollinations', 'huggingface']),
   /** HF Space 后端（FLUX.1-schnell，免密钥、匿名排队）配置。 */
   huggingface: z.object({
     space: z.string().default('black-forest-labs/FLUX.1-schnell'),
@@ -144,6 +147,11 @@ interface Output {
   size: string
   /** 用官方 brand 类型，图片块直接吃它。 */
   image?: ImageAttachmentRef
+  /**
+   * 要说给用户听的一句话（渲染成 `<note>…</note>`）：
+   * 本地配置文件的生成/错误、后端降档重试等。只出现在"真有事要说"的时候。
+   */
+  note?: string
 }
 
 /** 正整数兜底。 */
@@ -334,7 +342,7 @@ function spaceHost(space: string): string {
 }
 
 /**
- * HF Space 后端取图（默认后端）：走 gradio_api 的 /call/{api} + SSE 轮询，最后取回文件字节。
+ * HF Space 后端取图（可选后端）：走 gradio_api 的 /call/{api} + SSE 轮询，最后取回文件字节。
  * 免密钥、按 Space 队列排队；实测 FLUX.1-schnell 4 步 1024×1024 约 5s 出图（WebP）。
  */
 async function fetchFromHuggingFace(
@@ -343,6 +351,21 @@ async function fetchFromHuggingFace(
   o: { width: number; height: number; seed?: number },
   timeoutMs: number,
 ): Promise<FetchedImage> {
+  // 先探一下 huggingface.co 到底通不通。
+  //
+  // 为什么值得多这一下：国内网络（实测）`huggingface.co` 是**直接超时**的 ——
+  // 不探的话每次生成都要先白等一整个 timeout（默认 60 秒）才轮到下一个后端，
+  // 用户体感就是"点一下生图要等一分钟"。探不通就**当场跳过**，并且记住一段时间，
+  // 后面几次连这一下都省了。
+  if (Date.now() < hfBlockedUntil) {
+    throw new Error('huggingface.co 之前连不上（已记住，稍后再试）')
+  }
+  try {
+    await fetch('https://huggingface.co/', { method: 'HEAD', signal: AbortSignal.timeout(HF_PROBE_MS) })
+  } catch (error) {
+    hfBlockedUntil = Date.now() + HF_BLOCKED_MEMO_MS
+    throw new Error(`huggingface.co 连不上（${error instanceof Error ? error.message : String(error)}），本次跳过`)
+  }
   const space = typeof config.huggingface?.space === 'string' && config.huggingface.space !== ''
     ? config.huggingface.space
     : 'black-forest-labs/FLUX.1-schnell'
@@ -480,6 +503,104 @@ async function fetchImage(
   )
 }
 
+/* --------------------------------------------------- 本地配置文件（可选但推荐） */
+
+/**
+ * `~/.dsh/image-gen.json`：**不用改 profile 组合、不用重启**就能覆盖下面的配置。
+ *
+ * 为什么要有它：想稳定出图得填 Together.ai 的 key，而"编辑 `cordis.patch.yml` 里的 YAML"
+ * 对非技术用户是道硬门槛（缩进错一格整个 profile 都起不来）。这里改成给一个 JSON 文件：
+ * **第一次调用工具时自动生成模板**，填进去下一次出图就生效。
+ *
+ * 键名与组合配置一致；嵌套的 `together` / `huggingface` 做浅合并
+ * （只写 `together.key` 也能生效，不必把 baseUrl/model 抄一遍）。
+ */
+const LOCAL_CONFIG_FILE = 'image-gen.json'
+
+/** 允许被本地文件覆盖的键。`toolTimeoutMs` 故意不在内：工具超时必须在注册时就定下来。 */
+const LOCAL_KEYS = new Set([
+  'endpoint', 'width', 'height', 'model', 'enhance', 'private', 'nologo', 'token',
+  'providers', 'huggingface', 'together', 'attach', 'timeoutMs',
+])
+
+const LOCAL_TEMPLATE = `${JSON.stringify({
+  _说明: '这个文件覆盖插件的默认配置；改完【下一次出图就生效】，不用重启 DSH。',
+  _想稳定出图: '去 https://api.together.xyz 免费注册拿 key → 填进 together.key → 把 providers 改成 ["together"]。',
+  _pollinations_token: 'https://auth.pollinations.ai 免费注册拿 token 填进 token，比匿名档稳（匿名约 15 秒一条）。',
+  providers: ['pollinations', 'huggingface'],
+  together: { key: '' },
+  token: '',
+  model: 'flux',
+  width: 1024,
+  height: 1024,
+  attach: true,
+  timeoutMs: 60000,
+}, null, 2)}\n`
+
+function dshHome(): string {
+  const home = process.env.DSH_HOME
+  return home !== undefined && home !== '' ? home : join(homedir(), '.dsh')
+}
+
+/** 探 huggingface.co 的超时（短一点：它只回答"通不通"，不干活）。 */
+const HF_PROBE_MS = 4000
+/** 探到连不上之后，多久之内不再去试（免得每次生成都白等这一下）。 */
+const HF_BLOCKED_MEMO_MS = 10 * 60 * 1000
+/** 进程内记住"HF 暂时连不上"的时刻。 */
+let hfBlockedUntil = 0
+
+/**
+ * 读本地覆盖配置；文件不存在就顺手写一份模板（让人知道有这么个地方、key 该填哪儿）。
+ * @returns 合成后的配置 + 一句该说给人听的话（只在该说的时候非空）。
+ */
+async function withLocalConfig(base: Config): Promise<{ config: Config; note: string }> {
+  const file = join(dshHome(), LOCAL_CONFIG_FILE)
+  let raw: string
+  try {
+    raw = await readFile(file, 'utf8')
+  } catch {
+    try {
+      await mkdir(dshHome(), { recursive: true })
+      await writeFile(file, LOCAL_TEMPLATE, 'utf8')
+      return {
+        config: base,
+        note: `已生成配置文件 ${file} —— 想稳定出图就在这里填 together.key，并把 providers 改成 ["together"]`,
+      }
+    } catch {
+      return { config: base, note: '' }
+    }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    return {
+      config: base,
+      note: `配置文件 ${file} 不是合法 JSON，本次已忽略（${error instanceof Error ? error.message : String(error)}）`,
+    }
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { config: base, note: `配置文件 ${file} 顶层必须是对象，本次已忽略` }
+  }
+  const merged = { ...base } as unknown as Record<string, unknown>
+  const unknownKeys: string[] = []
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (key.startsWith('_')) continue
+    if (LOCAL_KEYS.has(key) === false) { unknownKeys.push(key); continue }
+    if (value === undefined || value === null) continue
+    if (key === 'together' || key === 'huggingface') {
+      if (typeof value !== 'object' || Array.isArray(value)) { unknownKeys.push(key); continue }
+      merged[key] = { ...(base[key] as unknown as Record<string, unknown>), ...(value as Record<string, unknown>) }
+      continue
+    }
+    merged[key] = value
+  }
+  return {
+    config: merged as unknown as Config,
+    note: unknownKeys.length === 0 ? '' : `配置文件 ${file} 里有不认识的键（已忽略）：${unknownKeys.join(', ')}`,
+  }
+}
+
 export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'image_generate',
@@ -530,22 +651,28 @@ export function apply(ctx: Context, config: Config): void {
           `<size>${out.size}</size>`,
         ]
         if (out.image === undefined) lines.push('<attached>false</attached>')
+        // note 要真的显示出来：它是"配置文件生成了/写错了""降档重试了"的唯一出口，
+        // 只塞进返回值不渲染，等于没说。
+        if (typeof out.note === 'string' && out.note !== '') lines.push('', `<note>${out.note}</note>`)
         const blocks: ContentBlock[] = [{ type: 'text', text: lines.join('\n') }]
         if (out.image !== undefined) blocks.push({ type: 'image', attachment: out.image })
         return blocks
       },
     },
     async execute(args) {
+      // 每次调用都读一遍本地覆盖文件：改完**下一次出图就生效**，不用重启、不用重载插件。
+      const local = await withLocalConfig(config)
+      const cfg = local.config
       const prompt = String(args.prompt ?? '').trim()
       if (prompt === '') throw new Error('image_generate: prompt 不能为空')
 
-      const width = int(args.width, int(config.width, 1920))
-      const height = int(args.height, int(config.height, 1080))
-      const model = typeof args.model === 'string' && args.model.trim() !== '' ? args.model.trim() : config.model
+      const width = int(args.width, int(cfg.width, 1920))
+      const height = int(args.height, int(cfg.height, 1080))
+      const model = typeof args.model === 'string' && args.model.trim() !== '' ? args.model.trim() : cfg.model
       const seedValue = args.seed === undefined ? undefined : int(args.seed, 0)
       const seed = seedValue === 0 ? undefined : seedValue
 
-      const wantAttach = args.attach === undefined ? config.attach : args.attach !== false
+      const wantAttach = args.attach === undefined ? cfg.attach : args.attach !== false
       // 已声明 inject attachments，正常一定在；再取一次是为了极端组合下降级为"只给直链"。
       const attachments = ctx.get('attachments') as
         | undefined
@@ -553,11 +680,17 @@ export function apply(ctx: Context, config: Config): void {
 
       // 不取图：只回 markdown + 直链（零字节下载，也让上游按需生成）。
       if (!wantAttach || attachments === undefined) {
-        const url = buildUrl(config, prompt, { width, height, model, seed })
-        return { url, markdown: `![image](${url})`, model, size: `${width}x${height}` }
+        const url = buildUrl(cfg, prompt, { width, height, model, seed })
+        return {
+          url,
+          markdown: `![image](${url})`,
+          model,
+          size: `${width}x${height}`,
+          ...(local.note === '' ? {} : { note: local.note }),
+        }
       }
 
-      const fetched = await fetchImage(config, prompt, { width, height, model, seed }, int(config.timeoutMs, 60000))
+      const fetched = await fetchImage(cfg, prompt, { width, height, model, seed }, int(cfg.timeoutMs, 60000))
       const { data, mediaType } = fetched
 
       const allowed = attachments.imageLimits?.mediaTypes ?? []
@@ -588,13 +721,18 @@ export function apply(ctx: Context, config: Config): void {
       } as unknown as ImageAttachmentRef
       if (typeof ref.name === 'string') (image as { name?: string }).name = ref.name
 
+      const notes = [
+        local.note,
+        fetched.note === undefined ? '' : `已降档重试（${fetched.strategy}）；首次请求：${fetched.note}`,
+      ].filter((entry) => entry !== '')
+
       return {
         url: fetched.url,
         markdown: `![image](${fetched.url})`,
         model: fetched.model,
         size: `${width}x${height}`,
         image,
-        ...(fetched.note === undefined ? {} : { note: `已降档重试（${fetched.strategy}）；首次请求：${fetched.note}` }),
+        ...(notes.length === 0 ? {} : { note: notes.join('；') }),
       }
     },
   })), '@dsh-external/dsh-plugin-image-gen: image_generate tool')

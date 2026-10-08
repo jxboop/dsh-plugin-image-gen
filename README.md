@@ -38,25 +38,51 @@ dsh plugin --profile web add <本仓库的绝对路径>
 
 ---
 
-## 配置（可选，但建议）
+## 配置：改一个 JSON 文件就行（不用碰 YAML、不用重启）
 
-默认走**免费后端**（HuggingFace Space → pollinations），它们**不太稳**：会限流（约 15 秒一条）、
-配额用尽时返回 402、高峰期可能连续失败。
+插件会读 **`~/.dsh/image-gen.json`**（Windows：`C:\Users\<你>\.dsh\image-gen.json`）。
+**第一次生图时自动生成一份模板**，打开就能看到该填什么：
 
-想稳定出图，去 <https://api.together.xyz> **免费注册**拿一个 API key，然后编辑本插件的装配行
-（`~/.dsh/profiles/<你的 profile>/cordis.patch.yml`）：
-
-```yaml
-- insert:
-    - id: image-gen
-      name: '@dsh-external/dsh-plugin-image-gen'
-      config:
-        providers: ['together']
-        together:
-          key: <你的 key>
+```json
+{
+  "providers": ["pollinations", "huggingface"],
+  "together": { "key": "" },
+  "token": "",
+  "model": "flux"
+}
 ```
 
-重启 DSH 生效。
+**改完下一次生图就生效**（每次调用都读一遍，不用重启、不用重载插件）。规则：
+
+- 这里的键**优先于**组合配置（`cordis.patch.yml`）；不写就用默认值。
+- 支持：`endpoint` `width` `height` `model` `enhance` `private` `nologo` `token` `providers`
+  `huggingface` `together` `attach` `timeoutMs`
+  （`toolTimeoutMs` 只能在组合里改 —— 工具超时必须注册时就定下来）。
+- 嵌套的 `together` / `huggingface` 做**浅合并**：只写 `together.key` 就够，不必把 `baseUrl` / `model` 抄一遍。
+- 写坏了不会崩：那次生成按默认配置走，并在结果里回一句话告诉你哪儿不对
+  （"不是合法 JSON""有不认识的键"…）。
+
+### 三条路怎么选（按你的网络）
+
+| 你的情况 | 建议 |
+|---|---|
+| 国内网络、不想折腾 | **保持默认**：`providers: ["pollinations","huggingface"]`。pollinations 在国内**可直连**；HF 通常连不上，但插件会**探一下、不通就跳过**（不会白等） |
+| 想更稳一点 | 去 <https://auth.pollinations.ai> 免费注册拿 token，填进 `token`（**注册那一下要翻，之后出图不用**） |
+| 有加速器 / 在海外 | 去 <https://api.together.xyz> 免费注册拿 key，填 `together.key`，并把 `providers` 改成 `["together"]`（最快最稳，出图 1–3 秒） |
+
+> 高级做法：也可以直接改组合配置里的装配行（`~/.dsh/profiles/<你的 profile>/cordis.patch.yml`）：
+>
+> ```yaml
+> - insert:
+>     - id: image-gen
+>       name: '@dsh-external/dsh-plugin-image-gen'
+>       config:
+>         providers: ['together']
+>         together:
+>           key: <你的 key>
+> ```
+>
+> 改完要重启 DSH。**本地 JSON 文件优先于它**，所以平时建议只维护那个文件。
 
 ---
 

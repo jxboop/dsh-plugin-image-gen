@@ -1,20 +1,3 @@
-/**
- * @dsh-external/dsh-plugin-image-gen — 工具包形态。
- *
- * 把"生图路径"做成一个可复用工具：
- *   prompt（英文、尽量具体）→ URL 编码 → pollinations 生图接口 → 取回字节
- *   → 存入 attachments（拿到 sha256 附件引用）→ 以真正的图片块显示。
- *
- * 为什么要落附件而不是只回一段 markdown：
- *   markdown 图片能否渲染取决于 GUI 渲染器与 CSP；附件是 DSH 原生图片通路
- *   （read_image 走的就是它），`{ type: 'image', attachment }` 一定能显示。
- *   两条路都给：文本块带 markdown 与直链，图片块带真图。
- *
- * 关于 token 成本与文本模型：
- *   图片块会随请求送入模型（我就能"看到"这张图）。对不支持图片输入的模型，
- *   请求装配会走 dsh-llm 的 projectImagesForTextModel 把它投影成文本句柄，
- *   不会报错、GUI 仍从会话日志渲染附件。不需要我看图时传 attach=false 即可。
- */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 export declare const name = "@dsh-external/dsh-plugin-image-gen";
