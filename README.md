@@ -23,6 +23,11 @@ dsh plugin --profile web add <本仓库的绝对路径>
 
 验证：随便开一个会话，直接说「用 image_generate 生成一张图」，能出图就是装好了。
 
+> **装完发现"还是没有这个工具"？** 说明这个包只是被当依赖装下来了，没有进 profile 的装配列表。
+> 打开 `~/.dsh/profiles/<你的 profile>/package.json`，在 `dsh.profile.bundles` 里加上一行
+> `"@dsh-external/dsh-plugin-image-gen"`，再重启 DSH。（本包已声明 `dsh.bundle.patch`，
+> 正常情况下不需要这一步。）
+
 > **手机桥用户注意**：手机界面工具栏上的「生图」键**就是调这个工具**（它本身不直连生图后端，
 > 只是把「请用 image_generate 生成一张图片…」这句话交给会话）。
 > 没装这个插件时，agent 只会回一句"没有这个工具 / 没有生图模型" ——
@@ -30,6 +35,28 @@ dsh plugin --profile web add <本仓库的绝对路径>
 >
 > 环境要求：Node 22+；DSH 版本与 peer 依赖见 `package.json`。
 > 仓库里带了构建产物 `lib/`，装完即可用，**不需要**在本地再编译。
+
+---
+
+## 配置（可选，但建议）
+
+默认走**免费后端**（HuggingFace Space → pollinations），它们**不太稳**：会限流（约 15 秒一条）、
+配额用尽时返回 402、高峰期可能连续失败。
+
+想稳定出图，去 <https://api.together.xyz> **免费注册**拿一个 API key，然后编辑本插件的装配行
+（`~/.dsh/profiles/<你的 profile>/cordis.patch.yml`）：
+
+```yaml
+- insert:
+    - id: image-gen
+      name: '@dsh-external/dsh-plugin-image-gen'
+      config:
+        providers: ['together']
+        together:
+          key: <你的 key>
+```
+
+重启 DSH 生效。
 
 ---
 

@@ -4,6 +4,24 @@
 
 ---
 
+## 1.0.1 — 2026-10-08
+
+### 修
+
+**装上之后 DSH 不会挂载它（缺 bundle 声明）**
+
+- 本包之前只有 `lib/` + `package.json`，**没有 `cordis.patch.yml`，也没有 `dsh.bundle` 声明** ——
+  照"一条命令装插件"装下来，pnpm 会把依赖装上，但 **DSH 的组合里没有它的装配行**，
+  `apply()` 永远不会跑 → 结果是"装完了，agent 还是说没有 `image_generate` 这个工具"。
+- 修：补上 `cordis.patch.yml`（`- insert: - id: image-gen`）并在 `package.json` 里声明
+  `dsh.bundle.patch`，同时把它加进 `files`。
+- README 也补了一句兜底：万一还是没挂上，就把包名加进 profile 的 `dsh.profile.bundles`。
+
+### 文档
+
+- README 新增《配置（可选，但建议）》：免费后端会限流/配额用尽（402），想稳定出图就用
+  Together.ai 的免费 key，并给出完整的 `cordis.patch.yml` 配置片段。
+
 ## 1.0.0 — 2026-10-08
 
 第一个公开版本。把「一条提示词 → 一张图」做成 DSH 的 host 工具 **`image_generate`**：

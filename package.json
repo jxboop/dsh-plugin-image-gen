@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-plugin-image-gen",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "把一条提示词变成图片：host 工具 image_generate（HF FLUX 无水印优先 / pollinations 兜底，落盘为附件）——手机桥的「生图」键就是调它",
   "private": true,
   "type": "module",
@@ -14,8 +14,15 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "license": "BSD-3-Clause",
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0-rc <5",

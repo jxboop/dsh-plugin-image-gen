@@ -1,0 +1,20 @@
+# @dsh-external/dsh-plugin-image-gen bundle patch.
+#
+# Host-only plugin: it registers exactly one host tool (`image_generate`) and adds
+# nothing to the web/client bundle graph. This row exists so Cordis mounts the
+# package and `apply()` runs — without it, installing the package as a plugin would
+# add the dependency but never mount it (the tool would simply not exist).
+#
+# 想配 Together.ai（免费、比 pollinations 稳）就在这里改成：
+#
+#   - insert:
+#       - id: image-gen
+#         name: '@dsh-external/dsh-plugin-image-gen'
+#         config:
+#           providers: ['together']
+#           together:
+#             key: <你的 key>
+
+- insert:
+    - id: image-gen
+      name: '@dsh-external/dsh-plugin-image-gen'
