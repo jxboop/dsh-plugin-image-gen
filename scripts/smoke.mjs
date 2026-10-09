@@ -39,7 +39,9 @@ const fakeAttachments = {
 const ctx = {
   effect(fn) { return fn() },
   get(service) { return service === 'attachments' ? fakeAttachments : undefined },
-  tools: { register(tool) { registered = tool; return () => {} } },
+  // 插件现在注册**两个**工具（image_generate / video_generate）。这个脚本通篇在验生图，
+  // 所以按名字挑出生图那个 —— 直接取"最后注册的"会拿到 video_generate（曾经就是这么崩的）。
+  tools: { register(tool) { if (tool.name === 'image_generate') registered = tool; return () => {} } },
 }
 
 console.log(`plugin name = ${name}`)
@@ -119,7 +121,7 @@ globalThis.fetch = async (url, init) => {
   return await realFetch(url, init)
 }
 let hfOnly
-apply({ ...ctx, tools: { register(tool) { hfOnly = tool; return () => {} } } }, {
+apply({ ...ctx, tools: { register(tool) { if (tool.name === 'image_generate') hfOnly = tool; return () => {} } } }, {
   endpoint: 'https://image.pollinations.ai/prompt/',
   width: 512, height: 512, model: 'flux', enhance: false, private: false, nologo: true, safe: true,
   // 必须 attach=true：attach=false 那条分支压根不取图（只拼 URL），测不到 HF。

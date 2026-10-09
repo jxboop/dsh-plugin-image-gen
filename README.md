@@ -120,6 +120,35 @@ markdown 图片能不能渲染取决于 GUI 渲染器与 CSP；**附件是 DSH �
 
 ---
 
+## 工具契约：`video_generate`（1.4.0 起）
+
+把一句提示词变成一段视频。**免费**（智谱 CogVideoX 的 `cogvideox-flash`），
+和生图共用同一份智谱 key。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `prompt` | string | ✓ | 视频描述，中英文都行：主体、动作、镜头运动、风格 |
+| `size` | string | | 分辨率，默认取配置（`1920x1080`；横屏 1280x720 / 竖屏 1080x1920 也行） |
+| `fps` | integer | | 帧率，默认 30 |
+| `model` | string | | `cogvideox-flash`（默认，**免费**，带智谱水印）/ `cogvideox-3`（更清晰、可带音频，按量计费） |
+| `imageUrl` | string | | 图生视频：**公网可访问**的图片 URL（智谱取不到本机文件，所以只收 URL） |
+
+返回 `{ path, url, model, size, bytes, seconds, coverUrl?, note? }`，
+其中 **`path` 是落在电脑上的 mp4 绝对路径**：手机桥看到文本里的 `.mp4` 路径会把它显示成
+**能直接播放的视频**（长按可存相册）。
+
+### 为什么是异步、为什么这么慢
+
+`POST /paas/v4/videos/generations` 只回一个任务 id，要轮询 `GET /paas/v4/async-result/{id}`
+直到 `task_status = SUCCESS`。免费模型实测 **56~63 秒**出一段 5 秒视频（高峰期排队更久）。
+所以：
+
+- 工具预算 `videoToolTimeoutMs`（默认 **9 分钟**）与轮询上限 `video.timeoutMs`（默认 8 分钟）
+  分开声明 —— 到点抛一句人话，而不是把整轮冻住；
+- mp4 落在 `~/.dsh/生成视频/`（手机桥白名单里有 `~/.dsh`，手机上才播得出来）。
+
+---
+
 ## 配置
 
 | 字段 | 默认 | 说明 |

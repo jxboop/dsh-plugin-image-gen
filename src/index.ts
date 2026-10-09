@@ -49,6 +49,11 @@ export interface Config {
   together: { key: string; baseUrl: string; model: string; steps: number }
   /** 智谱 BigModel（CogView）后端配置：国内直连可用，注册送额度，cogview-3-flash 免费。 */
   zhipu: { key: string; baseUrl: string; model: string }
+  /**
+   * 视频生成（智谱 CogVideoX）—— `cogvideox-flash` 是**免费**的（文生视频/图生视频，最高 4K）。
+   * 走同一份智谱 key；异步任务：提交 → 轮询 → 取回 mp4 落到 `dir`。
+   */
+  video: { key: string; baseUrl: string; model: string; size: string; fps: number; dir: string; pollIntervalMs: number; timeoutMs: number }
   attach: boolean
   timeoutMs: number
   /**
@@ -58,6 +63,8 @@ export interface Config {
    * 的工具结果，回合继续走完。
    */
   toolTimeoutMs: number
+  /** 视频工具的总预算：出片是分钟级的，必须比生图宽得多。 */
+  videoToolTimeoutMs: number
 }
 
 export const Config = z.object({
@@ -151,12 +158,38 @@ export const Config = z.object({
     baseUrl: z.string().default('https://open.bigmodel.cn/api/paas/v4'),
     model: z.string().default('cogview-3-flash'),
   }),
+  /**
+   * 视频生成（智谱 CogVideoX）—— 手机桥的「生视频」/ agent 的 video_generate 走这里。
+   *
+   * `cogvideox-flash` 是智谱的**免费视频模型**（文生视频 / 图生视频，分辨率最高 4K），
+   * 和 CogView 共用同一个 key，所以填过 `zhipu.key` 就直接能用。
+   *
+   * 它是**异步**接口：POST 提交拿 id → 轮询 `/async-result/{id}` → 成功后取回 mp4 落盘。
+   * 出片是分钟级的（免费模型排队更久），所以 `timeoutMs` 默认 8 分钟、工具预算 9 分钟；
+   * 落盘目录默认 `~/.dsh/生成视频/`（手机桥认识 `~/.dsh`，手机上能直接播、能存相册）。
+   */
+  video: z.object({
+    /** 留空 = 复用 `zhipu.key`（同一个平台，没必要填两遍）。 */
+    key: z.string().default(''),
+    baseUrl: z.string().default('https://open.bigmodel.cn/api/paas/v4'),
+    /** `cogvideox-flash` = 免费；`cogvideox-3` = 更清晰、可带音频，按量计费。 */
+    model: z.string().default('cogvideox-flash'),
+    size: z.string().default('1920x1080'),
+    fps: z.number().default(30),
+    /** 落盘目录：绝对路径，或相对 `~/.dsh` 的目录名。 */
+    dir: z.string().default('生成视频'),
+    pollIntervalMs: z.number().default(5000),
+    /** 轮询上限：超过就放弃（免费模型高峰期可能很久，别把工具预算耗光）。 */
+    timeoutMs: z.number().default(480000),
+  }),
   timeoutMs: z.number().default(60000),
   /**
    * 工具级总预算：默认 3 分钟，够"取图 + 落附件"这类正常调用，又短到
    * 上游挂住时能靠超时策略把回合交还给模型。(单后端取图预算见 timeoutMs)
    */
   toolTimeoutMs: z.number().default(180000),
+  /** 视频工具的总预算：出片分钟级，给足（比轮询上限略大，留出取回落盘的时间）。 */
+  videoToolTimeoutMs: z.number().default(540000),
 })
 
 /** attachments 只接受这四种；DSH 的参数/值 schema DSL 也按这四种声明。 */
@@ -524,6 +557,119 @@ function pickZhipuSize(width: number, height: number): string {
 }
 
 /**
+ * 视频落盘目录：`dir` 是绝对路径就直接用，否则当成 `~/.dsh` 下的目录名。
+ *
+ * 为什么默认落 `~/.dsh/生成视频/`：手机桥的白名单里有 `~/.dsh`（附件与上传），
+ * 所以手机上能直接把这支 mp4 播出来、长按存相册；落在别处手机就取不到了。
+ */
+function videoDir(config: Config): string {
+  const dir = typeof config.video?.dir === 'string' ? config.video.dir.trim() : ''
+  if (dir === '') return join(dshHome(), '生成视频')
+  return /^([A-Za-z]:[\\/]|\/)/.test(dir) ? dir : join(dshHome(), dir)
+}
+
+/** 视频文件名：从提示词取一段安全短句（中英文都留），加时间戳避免覆盖。 */
+function videoFileName(prompt: string): string {
+  const slug = prompt
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, ' ')
+    .replace(/\s+/g, '-')
+    .slice(0, 32)
+    .replace(/^-+|-+$/g, '')
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  return `${stamp}-${slug === '' ? 'video' : slug}.mp4`
+}
+
+/**
+ * 智谱视频生成（**异步**）：提交 → 轮询 → 取回 mp4 落盘。
+ *
+ * 为什么必须轮询：`/videos/generations` 只回一个任务 id，`task_status` 先是 PROCESSING；
+ * 出片要几十秒到几分钟（免费模型排队更久）。DSH 的工具超时是协作式的 —— 所以这里
+ * 自己带总预算（`timeoutMs`），到点就抛一句人话，而不是把整轮冻住。
+ *
+ * 返回 `{ path, url, bytes, seconds, model }`；封面图 URL 也带回去（手机上可先看封面）。
+ */
+async function generateVideoFromZhipu(
+  config: Config,
+  prompt: string,
+  o: { size: string; fps: number; model: string; imageUrl?: string },
+): Promise<{ path: string; url: string; coverUrl?: string; bytes: number; seconds: number; model: string; waitedMs: number }> {
+  const key = (config.video?.key ?? '').trim() !== '' ? config.video.key.trim() : (config.zhipu?.key ?? '').trim()
+  if (key === '') {
+    throw new Error('video_generate: 未配置 key（填 image-gen.json 的 zhipu.key 即可，智谱注册免费，cogvideox-flash 免费）')
+  }
+  const problem = zhipuKeyProblem(key)
+  if (problem !== undefined) throw new Error(problem)
+  const baseUrl = (config.video?.baseUrl || 'https://open.bigmodel.cn/api/paas/v4').replace(/\/+$/, '')
+  const model = o.model !== '' ? o.model : (config.video?.model || 'cogvideox-flash')
+  const payload: Record<string, unknown> = { model, prompt, size: o.size, fps: o.fps }
+  // 图生视频：智谱只吃**公网 URL**（本地文件不行，它取不到），没有就别塞这个字段。
+  if (typeof o.imageUrl === 'string' && o.imageUrl !== '') payload.image_url = o.imageUrl
+  // with_audio 只有 cogvideox-3 认；给 flash 塞这个字段会被判非法。
+  if (model.startsWith('cogvideox-3')) payload.with_audio = true
+
+  const started = Date.now()
+  const submit = await fetch(`${baseUrl}/videos/generations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(Math.min(60000, int(config.video?.timeoutMs, 480000))),
+  })
+  if (!submit.ok) {
+    throw new Error(`提交失败 HTTP ${submit.status}（${(await submit.text().catch(() => '')).slice(0, 200)}）`)
+  }
+  const submitted = (await submit.json()) as { id?: string; request_id?: string; task_status?: string }
+  const id = submitted.id ?? submitted.request_id
+  if (typeof id !== 'string' || id === '') throw new Error('提交响应里没有任务 id')
+
+  const budget = int(config.video?.timeoutMs, 480000)
+  const interval = Math.max(1000, int(config.video?.pollIntervalMs, 5000))
+  let last = String(submitted.task_status ?? 'PROCESSING')
+  for (;;) {
+    if (Date.now() - started > budget) {
+      throw new Error(`视频生成超时（等了 ${Math.round((Date.now() - started) / 1000)} 秒仍是 ${last}）。免费模型高峰期会很久，过一会儿再试；任务 id：${id}`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, interval))
+    const poll = await fetch(`${baseUrl}/async-result/${encodeURIComponent(id)}`, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(30000),
+    })
+    const text = await poll.text()
+    if (!poll.ok) throw new Error(`查询失败 HTTP ${poll.status}（${text.slice(0, 160)}）`)
+    let parsed: { task_status?: string; video_result?: Array<{ url?: string; cover_image_url?: string }> }
+    try {
+      parsed = JSON.parse(text) as typeof parsed
+    } catch {
+      throw new Error(`查询返回的不是 JSON：${text.slice(0, 160)}`)
+    }
+    last = String(parsed.task_status ?? last)
+    if (last === 'FAIL') throw new Error(`生成失败（智谱返回 FAIL）：${text.slice(0, 200)}`)
+    if (last !== 'SUCCESS') continue
+    const first = parsed.video_result?.[0]
+    const url = typeof first?.url === 'string' ? first.url : ''
+    if (url === '') throw new Error(`任务成功但没给视频地址：${text.slice(0, 200)}`)
+    const file = await fetch(url, { signal: AbortSignal.timeout(120000) })
+    if (!file.ok) throw new Error(`取回视频失败 HTTP ${file.status}`)
+    const data = new Uint8Array(await file.arrayBuffer())
+    if (data.byteLength === 0) throw new Error('取回的视频是 0 字节')
+    const dir = videoDir(config)
+    await mkdir(dir, { recursive: true })
+    const path = join(dir, videoFileName(prompt))
+    await writeFile(path, data)
+    const out: { path: string; url: string; coverUrl?: string; bytes: number; seconds: number; model: string; waitedMs: number } = {
+      path,
+      url,
+      bytes: data.byteLength,
+      // mp4 没法从字节里便宜地读时长，这里报"生成等待"的秒数，够用户判断成本。
+      seconds: Math.round((Date.now() - started) / 1000),
+      model,
+      waitedMs: Date.now() - started,
+    }
+    if (typeof first?.cover_image_url === 'string' && first.cover_image_url !== '') out.coverUrl = first.cover_image_url
+    return out
+  }
+}
+
+/**
  * 智谱 BigModel（CogView）后端：`POST {baseUrl}/images/generations`。
  *
  * 为什么单开一个后端、不复用 Together 那条"OpenAI 兼容"：
@@ -710,6 +856,7 @@ const LOCAL_CONFIG_FILE = 'image-gen.json'
 const LOCAL_KEYS = new Set([
   'endpoint', 'width', 'height', 'model', 'enhance', 'private', 'nologo', 'token',
   'providers', 'huggingface', 'together', 'zhipu', 'attach', 'timeoutMs', 'removeWatermark',
+  'video',
 ])
 
 const LOCAL_TEMPLATE = `${JSON.stringify({
@@ -718,9 +865,11 @@ const LOCAL_TEMPLATE = `${JSON.stringify({
   _有加速器: '去 https://api.together.xyz 免费注册拿 key → 填进 together.key → providers 改成 ["together"]（1-3 秒出图）。',
   _pollinations_token: 'https://gen.pollinations.ai 免费注册拿 token 填进 token，比匿名档稳（匿名约 15 秒一条）。',
   _去水印: '智谱的图右下角有「AI生成」角标，默认出图后本地抹掉（removeWatermark: true）。想保留角标（比如要公开传播 AI 内容、需要显式标识）就改成 false。',
+  _生视频: 'video_generate 走智谱 CogVideoX，和生图共用 key（zhipu.key）。cogvideox-flash 免费；cogvideox-3 更清晰、可带音频但要计费。出片分钟级，mp4 落在 ~/.dsh/生成视频/。',
   providers: ['pollinations', 'huggingface'],
   zhipu: { key: '' },
   together: { key: '' },
+  video: { model: 'cogvideox-flash', size: '1920x1080', fps: 30 },
   token: '',
   model: 'flux',
   width: 1024,
@@ -781,7 +930,7 @@ async function withLocalConfig(base: Config): Promise<{ config: Config; note: st
     if (key.startsWith('_')) continue
     if (LOCAL_KEYS.has(key) === false) { unknownKeys.push(key); continue }
     if (value === undefined || value === null) continue
-    if (key === 'together' || key === 'huggingface' || key === 'zhipu') {
+    if (key === 'together' || key === 'huggingface' || key === 'zhipu' || key === 'video') {
       if (typeof value !== 'object' || Array.isArray(value)) { unknownKeys.push(key); continue }
       merged[key] = { ...(base[key] as unknown as Record<string, unknown>), ...(value as Record<string, unknown>) }
       continue
@@ -934,4 +1083,81 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
   })), '@dsh-external/dsh-plugin-image-gen: image_generate tool')
+
+  /**
+   * 视频生成：和生图**分开一个工具**（不是加个参数）。
+   *
+   * 理由：① 出片是分钟级、还可能排队 —— 和"3 秒出一张图"是两种东西，混在一个工具里
+   * 会让模型误以为生图也可能要等几分钟；② 超时预算必须分开声明；
+   * ③ 形态也不同：图能落成附件直接显示，视频只能落成**文件**（attachments 只收四种图片
+   * 类型），手机桥那边靠"路径 → 可播视频"来显示。
+   */
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'video_generate',
+    description: '按提示词生成一段视频（智谱 CogVideoX，cogvideox-flash 免费），存成 mp4 并返回文件路径 —— 手机端会把它显示成能直接播放的视频。提示词中英文都行，越具体越好（主体 / 动作 / 镜头 / 风格）；出片是分钟级的（免费模型排队更久），别把它当成生图那样秒回。',
+    timeoutMs: int(config.videoToolTimeoutMs, 540000),
+    parameters: {
+      prompt: { type: 'string', required: true, description: '视频描述（中英文都行）：主体、动作、镜头运动、风格' },
+      size: { type: 'string', description: '分辨率，默认取配置（横屏 1920x1080 / 1280x720，竖屏 1080x1920）' },
+      fps: { type: 'integer', description: '帧率，默认 30' },
+      model: { type: 'string', description: 'cogvideox-flash（默认，免费）/ cogvideox-3（更清晰、带音频，按量计费）' },
+      imageUrl: { type: 'string', description: '图生视频：**公网可访问**的图片 URL（智谱取不到本机文件，所以这里只收 URL）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          path: { type: 'string', required: true },
+          url: { type: 'string', required: true },
+          model: { type: 'string', required: true },
+          size: { type: 'string', required: true },
+          bytes: { type: 'integer', required: true },
+          seconds: { type: 'integer', required: true },
+          coverUrl: { type: 'string' },
+          note: { type: 'string' },
+        },
+      },
+      render(_args, value) {
+        const out = value as { path: string; url: string; model: string; size: string; bytes: number; seconds: number; coverUrl?: string; note?: string }
+        const lines = [
+          `🎬 视频已生成：${out.path}`,
+          '',
+          `<model>${out.model}</model>`,
+          `<size>${out.size}</size>`,
+          `<bytes>${out.bytes}</bytes>`,
+          `<生成等待>${out.seconds} 秒</生成等待>`,
+          `<url>${out.url}</url>`,
+        ]
+        // 路径要**单独占一行**：手机桥是按"文本里出现 .mp4 路径"来变成可播视频的（PATH_RE）。
+        if (typeof out.coverUrl === 'string') lines.push(`<cover>${out.coverUrl}</cover>`)
+        if (typeof out.note === 'string' && out.note !== '') lines.push('', `<note>${out.note}</note>`)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args) {
+      const local = await withLocalConfig(config)
+      const cfg = local.config
+      const prompt = String(args.prompt ?? '').trim()
+      if (prompt === '') throw new Error('video_generate: prompt 不能为空')
+      const size = typeof args.size === 'string' && args.size.trim() !== '' ? args.size.trim() : (cfg.video?.size || '1920x1080')
+      const fps = int(args.fps, int(cfg.video?.fps, 30))
+      const model = typeof args.model === 'string' && args.model.trim() !== '' ? args.model.trim() : (cfg.video?.model || 'cogvideox-flash')
+      const imageUrl = typeof args.imageUrl === 'string' && args.imageUrl.trim() !== '' ? args.imageUrl.trim() : undefined
+      const made = await generateVideoFromZhipu(cfg, prompt, { size, fps, model, ...(imageUrl === undefined ? {} : { imageUrl }) })
+      const notes = [local.note]
+      if (model.startsWith('cogvideox-3')) notes.push('用的是 cogvideox-3（按量计费）；想免费就把 model 换回 cogvideox-flash')
+      else notes.push('cogvideox-flash 是免费模型，但会带智谱水印；要干净画面用 cogvideox-3（计费）')
+      return {
+        path: made.path,
+        url: made.url,
+        model: made.model,
+        size,
+        bytes: made.bytes,
+        seconds: made.seconds,
+        ...(made.coverUrl === undefined ? {} : { coverUrl: made.coverUrl }),
+        note: notes.filter((entry) => entry !== '').join('；'),
+      }
+    },
+  })), '@dsh-external/dsh-plugin-image-gen: video_generate tool')
 }

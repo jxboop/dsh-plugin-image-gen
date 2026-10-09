@@ -35,6 +35,20 @@ export interface Config {
         baseUrl: string;
         model: string;
     };
+    /**
+     * 视频生成（智谱 CogVideoX）—— `cogvideox-flash` 是**免费**的（文生视频/图生视频，最高 4K）。
+     * 走同一份智谱 key；异步任务：提交 → 轮询 → 取回 mp4 落到 `dir`。
+     */
+    video: {
+        key: string;
+        baseUrl: string;
+        model: string;
+        size: string;
+        fps: number;
+        dir: string;
+        pollIntervalMs: number;
+        timeoutMs: number;
+    };
     attach: boolean;
     timeoutMs: number;
     /**
@@ -44,6 +58,8 @@ export interface Config {
      * 的工具结果，回合继续走完。
      */
     toolTimeoutMs: number;
+    /** 视频工具的总预算：出片是分钟级的，必须比生图宽得多。 */
+    videoToolTimeoutMs: number;
 }
 export declare const Config: z<Schemastery.ObjectS<{
     /** 生图接口前缀，prompt 以 URL 编码追加在其后。 */
@@ -149,12 +165,51 @@ export declare const Config: z<Schemastery.ObjectS<{
         baseUrl: z<string, string>;
         model: z<string, string>;
     }>>;
+    /**
+     * 视频生成（智谱 CogVideoX）—— 手机桥的「生视频」/ agent 的 video_generate 走这里。
+     *
+     * `cogvideox-flash` 是智谱的**免费视频模型**（文生视频 / 图生视频，分辨率最高 4K），
+     * 和 CogView 共用同一个 key，所以填过 `zhipu.key` 就直接能用。
+     *
+     * 它是**异步**接口：POST 提交拿 id → 轮询 `/async-result/{id}` → 成功后取回 mp4 落盘。
+     * 出片是分钟级的（免费模型排队更久），所以 `timeoutMs` 默认 8 分钟、工具预算 9 分钟；
+     * 落盘目录默认 `~/.dsh/生成视频/`（手机桥认识 `~/.dsh`，手机上能直接播、能存相册）。
+     */
+    video: z<Schemastery.ObjectS<{
+        /** 留空 = 复用 `zhipu.key`（同一个平台，没必要填两遍）。 */
+        key: z<string, string>;
+        baseUrl: z<string, string>;
+        /** `cogvideox-flash` = 免费；`cogvideox-3` = 更清晰、可带音频，按量计费。 */
+        model: z<string, string>;
+        size: z<string, string>;
+        fps: z<number, number>;
+        /** 落盘目录：绝对路径，或相对 `~/.dsh` 的目录名。 */
+        dir: z<string, string>;
+        pollIntervalMs: z<number, number>;
+        /** 轮询上限：超过就放弃（免费模型高峰期可能很久，别把工具预算耗光）。 */
+        timeoutMs: z<number, number>;
+    }>, Schemastery.ObjectT<{
+        /** 留空 = 复用 `zhipu.key`（同一个平台，没必要填两遍）。 */
+        key: z<string, string>;
+        baseUrl: z<string, string>;
+        /** `cogvideox-flash` = 免费；`cogvideox-3` = 更清晰、可带音频，按量计费。 */
+        model: z<string, string>;
+        size: z<string, string>;
+        fps: z<number, number>;
+        /** 落盘目录：绝对路径，或相对 `~/.dsh` 的目录名。 */
+        dir: z<string, string>;
+        pollIntervalMs: z<number, number>;
+        /** 轮询上限：超过就放弃（免费模型高峰期可能很久，别把工具预算耗光）。 */
+        timeoutMs: z<number, number>;
+    }>>;
     timeoutMs: z<number, number>;
     /**
      * 工具级总预算：默认 3 分钟，够"取图 + 落附件"这类正常调用，又短到
      * 上游挂住时能靠超时策略把回合交还给模型。(单后端取图预算见 timeoutMs)
      */
     toolTimeoutMs: z<number, number>;
+    /** 视频工具的总预算：出片分钟级，给足（比轮询上限略大，留出取回落盘的时间）。 */
+    videoToolTimeoutMs: z<number, number>;
 }>, Schemastery.ObjectT<{
     /** 生图接口前缀，prompt 以 URL 编码追加在其后。 */
     endpoint: z<string, string>;
@@ -259,11 +314,50 @@ export declare const Config: z<Schemastery.ObjectS<{
         baseUrl: z<string, string>;
         model: z<string, string>;
     }>>;
+    /**
+     * 视频生成（智谱 CogVideoX）—— 手机桥的「生视频」/ agent 的 video_generate 走这里。
+     *
+     * `cogvideox-flash` 是智谱的**免费视频模型**（文生视频 / 图生视频，分辨率最高 4K），
+     * 和 CogView 共用同一个 key，所以填过 `zhipu.key` 就直接能用。
+     *
+     * 它是**异步**接口：POST 提交拿 id → 轮询 `/async-result/{id}` → 成功后取回 mp4 落盘。
+     * 出片是分钟级的（免费模型排队更久），所以 `timeoutMs` 默认 8 分钟、工具预算 9 分钟；
+     * 落盘目录默认 `~/.dsh/生成视频/`（手机桥认识 `~/.dsh`，手机上能直接播、能存相册）。
+     */
+    video: z<Schemastery.ObjectS<{
+        /** 留空 = 复用 `zhipu.key`（同一个平台，没必要填两遍）。 */
+        key: z<string, string>;
+        baseUrl: z<string, string>;
+        /** `cogvideox-flash` = 免费；`cogvideox-3` = 更清晰、可带音频，按量计费。 */
+        model: z<string, string>;
+        size: z<string, string>;
+        fps: z<number, number>;
+        /** 落盘目录：绝对路径，或相对 `~/.dsh` 的目录名。 */
+        dir: z<string, string>;
+        pollIntervalMs: z<number, number>;
+        /** 轮询上限：超过就放弃（免费模型高峰期可能很久，别把工具预算耗光）。 */
+        timeoutMs: z<number, number>;
+    }>, Schemastery.ObjectT<{
+        /** 留空 = 复用 `zhipu.key`（同一个平台，没必要填两遍）。 */
+        key: z<string, string>;
+        baseUrl: z<string, string>;
+        /** `cogvideox-flash` = 免费；`cogvideox-3` = 更清晰、可带音频，按量计费。 */
+        model: z<string, string>;
+        size: z<string, string>;
+        fps: z<number, number>;
+        /** 落盘目录：绝对路径，或相对 `~/.dsh` 的目录名。 */
+        dir: z<string, string>;
+        pollIntervalMs: z<number, number>;
+        /** 轮询上限：超过就放弃（免费模型高峰期可能很久，别把工具预算耗光）。 */
+        timeoutMs: z<number, number>;
+    }>>;
     timeoutMs: z<number, number>;
     /**
      * 工具级总预算：默认 3 分钟，够"取图 + 落附件"这类正常调用，又短到
      * 上游挂住时能靠超时策略把回合交还给模型。(单后端取图预算见 timeoutMs)
      */
     toolTimeoutMs: z<number, number>;
+    /** 视频工具的总预算：出片分钟级，给足（比轮询上限略大，留出取回落盘的时间）。 */
+    videoToolTimeoutMs: z<number, number>;
 }>>;
 export declare function apply(ctx: Context, config: Config): void;
